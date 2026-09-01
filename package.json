@@ -1,17 +1,14 @@
 {
-  "name": "delta-mcp-server",
-  "version": "2.2.1",
+  "name": "delta-roblox-mcp",
+  "version": "3.0.0",
   "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "engines": {
-    "node": ">=18.0.0"
-  },
   "dependencies": {
-    "@google/genai": "latest",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "openai": "^4.71.0"
   }
 }
