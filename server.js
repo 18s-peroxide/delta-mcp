@@ -1,5 +1,5 @@
 import express from "express";
-import { GoogleGenAI } from "@google/genai";
+import OpenAI from "openai";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -7,8 +7,15 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 const app = express();
 app.use(express.json());
 
-// Explicitly pass the API key to prevent ADC lookup errors
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+// Initialize OpenRouter (OpenAI-compatible client)
+const openrouter = new OpenAI({
+  baseURL: "https://openrouter.ai/api/v1",
+  apiKey: process.env.OPENROUTER_API_KEY,
+  defaultHeaders: {
+    "HTTP-Referer": "https://delta-mcp-controller.render.com",
+    "X-Title": "Delta Roblox MCP Controller",
+  }
+});
 
 let pendingCommands = [];
 let commandResults = {};
@@ -16,7 +23,7 @@ let lastPollTime = 0;
 
 const mcpServer = new Server({
   name: "delta-roblox-mcp",
-  version: "2.2.7",
+  version: "3.0.0",
 }, {
   capabilities: { tools: {} }
 });
@@ -98,44 +105,95 @@ app.get('/status-check', (req, res) => {
   res.json({ connected, lastSeen: lastPollTime });
 });
 
+// Sleek, modern glassmorphism UI
 app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+  <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Delta Gemini MCP Controller</title>
+  <title>Delta AI Controller | MCP Hub</title>
   <style>
-    body { background: #121212; color: #fff; font-family: sans-serif; padding: 15px; margin: 0; }
-    h2 { color: #4285F4; text-align: center; }
-    textarea { width: 100%; height: 90px; background: #1e1e1e; color: #fff; border: 1px solid #333; padding: 10px; border-radius: 5px; box-sizing: border-box; font-size: 15px; }
-    button { width: 100%; background: #4285F4; color: #fff; border: none; padding: 12px; font-weight: bold; border-radius: 5px; margin-top: 10px; font-size: 16px; }
-    pre { background: #1e1e1e; padding: 10px; border-radius: 5px; overflow-x: auto; max-height: 280px; border: 1px solid #333; font-size: 13px; }
+    :root {
+      --bg: #09090b;
+      --card-bg: rgba(24, 24, 27, 0.7);
+      --border: rgba(255, 255, 255, 0.08);
+      --accent: #6366f1;
+      --accent-hover: #4f46e5;
+      --text: #f4f4f5;
+      --text-muted: #a1a1aa;
+      --success: #10b981;
+      --warning: #f59e0b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: var(--bg); color: var(--text); min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 20px; }
+    .container { width: 100%; max-width: 650px; background: var(--card-bg); backdrop-filter: blur(16px); border: 1px solid var(--border); border-radius: 16px; padding: 28px; box-shadow: 0 20px 40px rgba(0,0,0,0.5); }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 16px; }
+    h2 { font-size: 20px; font-weight: 600; letter-spacing: -0.5px; }
+    .status-badge { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; background: rgba(255,255,255,0.03); padding: 6px 12px; border-radius: 20px; border: 1px solid var(--border); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warning); transition: background 0.3s; }
+    .dot.connected { background: var(--success); box-shadow: 0 0 10px var(--success); }
+    label { display: block; font-size: 13px; font-weight: 500; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+    textarea { width: 100%; height: 110px; background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--border); padding: 14px; border-radius: 10px; font-size: 14px; resize: none; outline: none; transition: border-color 0.2s; }
+    textarea:focus { border-color: var(--accent); }
+    .controls { display: flex; gap: 12px; margin-top: 14px; }
+    select { background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--border); padding: 0 14px; border-radius: 10px; font-size: 14px; outline: none; cursor: pointer; }
+    button { flex: 1; background: var(--accent); color: #fff; border: none; padding: 14px; font-weight: 600; border-radius: 10px; cursor: pointer; transition: background 0.2s, transform 0.1s; font-size: 14px; }
+    button:hover { background: var(--accent-hover); }
+    button:active { transform: scale(0.98); }
+    .output-container { margin-top: 24px; }
+    pre { background: rgba(0,0,0,0.4); color: #34d399; padding: 16px; border-radius: 10px; overflow-x: auto; max-height: 300px; border: 1px solid var(--border); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.5; }
   </style>
 </head>
 <body>
-  <h2>Delta AI Controller (Gemini MCP)</h2>
-  <p>Status: <span id="status" style="color:yellow;">Checking connection...</span></p>
-  <label>Ask Gemini to control your game or read scripts:</label>
-  <textarea id="prompt" placeholder="e.g. Read the script at game.StarterPlayer.StarterPlayerScripts.ClientScript or make my walkspeed 100"></textarea>
-  <button onclick="sendAICommand()">Send to Gemini MCP</button>
-  <h3>Execution Output:</h3>
-  <pre id="output">Ready...</pre>
+  <div class="container">
+    <div class="header">
+      <h2>Delta AI Controller</h2>
+      <div class="status-badge">
+        <div id="dot" class="dot"></div>
+        <span id="status-text">Connecting...</span>
+      </div>
+    </div>
+    
+    <div>
+      <label for="prompt">Command Prompt</label>
+      <textarea id="prompt" placeholder="e.g. Read workspace hierarchy or make my walkspeed 100..."></textarea>
+      <div class="controls">
+        <select id="model-select">
+          <option value="google/gemini-2.5-flash">Gemini 2.5 Flash</option>
+          <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet</option>
+          <option value="deepseek/deepseek-r1:free">DeepSeek R1 (Free)</option>
+        </select>
+        <button onclick="sendAICommand()">Execute via MCP</button>
+      </div>
+    </div>
+
+    <div class="output-container">
+      <label>Execution Output</label>
+      <pre id="output">System ready for commands...</pre>
+    </div>
+  </div>
 
   <script>
     async function sendAICommand() {
       const promptText = document.getElementById('prompt').value;
-      document.getElementById('output').innerText = "Gemini is processing your request via MCP...";
+      const model = document.getElementById('model-select').value;
+      const outputEl = document.getElementById('output');
+      
+      if (!promptText.trim()) return;
+      
+      outputEl.innerText = "Processing request through OpenRouter...";
       
       try {
         const res = await fetch('/ai-chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt: promptText })
+          body: JSON.stringify({ prompt: promptText, model })
         });
         const data = await res.json();
-        document.getElementById('output').innerText = data.output || JSON.stringify(data);
+        outputEl.innerText = data.output || JSON.stringify(data, null, 2);
       } catch (err) {
-        document.getElementById('output').innerText = "Error: " + err;
+        outputEl.innerText = "Error: " + err;
       }
     }
 
@@ -143,8 +201,15 @@ app.get("/", (req, res) => {
       try {
         const res = await fetch('/status-check');
         const data = await res.json();
-        document.getElementById('status').innerText = data.connected ? "Connected to Delta iOS" : "Waiting for Delta Client...";
-        document.getElementById('status').style.color = data.connected ? "#00ffcc" : "yellow";
+        const dot = document.getElementById('dot');
+        const text = document.getElementById('status-text');
+        if (data.connected) {
+          dot.classList.add('connected');
+          text.innerText = "Delta iOS Online";
+        } else {
+          dot.classList.remove('connected');
+          text.innerText = "Waiting for Delta...";
+        }
       } catch(e) {}
     }, 2000);
   </script>
@@ -153,15 +218,22 @@ app.get("/", (req, res) => {
 });
 
 app.post('/ai-chat', async (req, res) => {
-  const { prompt } = req.body;
+  const { prompt, model } = req.body;
+  const selectedModel = model || "google/gemini-2.5-flash";
+
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: `You are an expert Roblox Luau assistant. The user wants you to perform this task in their game: "${prompt}".
-If they want to execute code, format your Luau execution code inside standard markdown blocks using triple backticks followed by luau.`,
+    const completion = await openrouter.chat.completions.create({
+      model: selectedModel,
+      messages: [
+        {
+          role: "system",
+          content: "You are an expert Roblox Luau automation assistant. The user wants to run scripts or control game elements via Delta on iOS. If they want to run code, format your executable code strictly inside standard markdown blocks using triple backticks with 'luau' or 'lua'."
+        },
+        { role: "user", content: prompt }
+      ]
     });
 
-    const aiText = response.text;
+    const aiText = completion.choices[0].message.content;
     const match = aiText.match(/```(?:luau|lua)?([\s\S]*?)```/);
     const codeToRun = match ? match[1].trim() : `print([[${aiText.replace(/"/g, '\\"')}]])`;
 
@@ -179,10 +251,10 @@ If they want to execute code, format your Luau execution code inside standard ma
 
     res.json({ aiResponse: aiText, output: result.output });
   } catch (err) {
-    console.error("AI Chat Route Error:", err);
-    res.status(500).json({ output: "Gemini API Error: " + err.message });
+    console.error("OpenRouter Route Error:", err);
+    res.status(500).json({ output: "OpenRouter API Error: " + err.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Gemini MCP Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`OpenRouter MCP Server running on port ${PORT}`));
