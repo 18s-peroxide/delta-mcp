@@ -15,7 +15,7 @@ let lastPollTime = 0;
 
 const mcpServer = new Server({
   name: "delta-roblox-mcp",
-  version: "2.2.3",
+  version: "2.2.6",
 }, {
   capabilities: { tools: {} }
 });
@@ -80,7 +80,6 @@ app.post("/messages", async (req, res) => {
   else res.status(400).send("No SSE connection");
 });
 
-// Delta Polling Endpoint (Updates lastPollTime instantly)
 app.get("/delta/poll", (req, res) => {
   lastPollTime = Date.now();
   res.json(pendingCommands);
@@ -156,7 +155,7 @@ app.post('/ai-chat', async (req, res) => {
   const { prompt } = req.body;
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.6-flash',
       contents: `You are an expert Roblox Luau assistant. The user wants you to perform this task in their game: "${prompt}".
 If they want to execute code, format your Luau execution code inside standard markdown blocks using triple backticks followed by luau.`,
     });
@@ -179,6 +178,7 @@ If they want to execute code, format your Luau execution code inside standard ma
 
     res.json({ aiResponse: aiText, output: result.output });
   } catch (err) {
+    console.error("AI Chat Route Error:", err);
     res.status(500).json({ output: "Gemini API Error: " + err.message });
   }
 });
