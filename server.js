@@ -7,9 +7,10 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 const app = express();
 app.use(express.json());
 
+const apiKey = process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
 const openrouter = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
-  apiKey: process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY,
+  apiKey: apiKey,
   defaultHeaders: {
     "HTTP-Referer": "https://delta-mcp-controller.render.com",
     "X-Title": "Delta Roblox MCP Controller",
@@ -23,7 +24,7 @@ let clientInfo = { connected: false, username: "Not Connected", gameName: "Waiti
 
 const mcpServer = new Server({
   name: "delta-roblox-mcp",
-  version: "3.1.0",
+  version: "3.2.0",
 }, {
   capabilities: { tools: {} }
 });
@@ -101,14 +102,52 @@ app.get('/status-check', (req, res) => {
   res.json({ ...clientInfo, connected });
 });
 
-// Full UI Dashboard Layout
+// Endpoint to fetch all OpenRouter models dynamically with Free/Paid tags
+app.get('/api/models', async (req, res) => {
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/models", {
+      headers: { "Authorization": `Bearer ${apiKey}` }
+    });
+    const data = await response.json();
+    
+    if (!data.data) {
+      return res.json([]);
+    }
+
+    const models = data.data.map(m => {
+      const promptPrice = parseFloat(m.pricing?.prompt || "0");
+      const completionPrice = parseFloat(m.pricing?.completion || "0");
+      const isFree = promptPrice === 0 && completionPrice === 0;
+      
+      return {
+        id: m.id,
+        name: m.name || m.id,
+        isFree: isFree
+      };
+    });
+
+    // Sort free models first, then alphabetical
+    models.sort((a, b) => {
+      if (a.isFree && !b.isFree) return -1;
+      if (!a.isFree && b.isFree) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    res.json(models);
+  } catch (err) {
+    console.error("Failed to fetch models:", err);
+    res.status(500).json({ error: "Failed to fetch model catalog" });
+  }
+});
+
+// Full UI Dashboard Layout with Dynamic Dropdown Loader
 app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Delta AI Controller | Advanced MCP Hub</title>
+  <title>Delta AI Controller | Full OpenRouter Catalog</title>
   <style>
     :root {
       --bg: #0b0b0e;
@@ -120,14 +159,15 @@ app.get("/", (req, res) => {
       --text-muted: #94a3b8;
       --success: #10b981;
       --warning: #f59e0b;
+      --free-badge: #059669;
+      --paid-badge: #2563eb;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background-color: var(--bg); color: var(--text); min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 20px; }
-    .dashboard { width: 100%; max-width: 850px; background: var(--panel); border: 1px solid var(--border); border-radius: 20px; padding: 32px; box-shadow: 0 25px 50px rgba(0,0,0,0.6); display: grid; grid-template-columns: 1fr; gap: 24px; }
+    .dashboard { width: 100%; max-width: 900px; background: var(--panel); border: 1px solid var(--border); border-radius: 20px; padding: 32px; box-shadow: 0 25px 50px rgba(0,0,0,0.6); display: grid; grid-template-columns: 1fr; gap: 24px; }
     header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 20px; }
     h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
     
-    /* Telemetry Card */
     .telemetry-card { background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 12px; padding: 16px; display: flex; align-items: center; gap: 16px; }
     .game-icon { width: 56px; height: 56px; border-radius: 10px; background: #222; object-fit: cover; border: 1px solid var(--border); }
     .telemetry-info { flex: 1; display: flex; flex-direction: column; gap: 4px; }
@@ -138,7 +178,6 @@ app.get("/", (req, res) => {
     .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
     .dot.connected { background: var(--success); box-shadow: 0 0 8px var(--success); }
 
-    /* Workspace & Controls */
     .workspace { display: grid; grid-template-columns: 1fr; gap: 16px; }
     label { display: block; font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
     textarea { width: 100%; height: 120px; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid var(--border); padding: 14px; border-radius: 12px; font-size: 14px; resize: none; outline: none; transition: border-color 0.2s; }
@@ -146,11 +185,11 @@ app.get("/", (req, res) => {
     
     .action-bar { display: flex; gap: 12px; }
     select { flex: 2; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid var(--border); padding: 0 14px; border-radius: 12px; font-size: 14px; outline: none; cursor: pointer; }
+    option { background: #141419; color: var(--text); }
     button { flex: 1; background: var(--accent); color: #fff; border: none; padding: 14px; font-weight: 600; border-radius: 12px; cursor: pointer; transition: background 0.2s, transform 0.1s; font-size: 14px; }
     button:hover { background: var(--accent-hover); }
     button:active { transform: scale(0.98); }
 
-    /* Output Console */
     .console-box { background: rgba(0,0,0,0.5); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
     pre { color: #34d399; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.5; overflow-x: auto; max-height: 250px; }
   </style>
@@ -165,7 +204,6 @@ app.get("/", (req, res) => {
       </div>
     </header>
 
-    <!-- Roblox Telemetry Status Box -->
     <div class="telemetry-card">
       <img id="game-icon" class="game-icon" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23333' d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z'/%3E%3C/svg%3E" alt="Game Icon">
       <div class="telemetry-info">
@@ -178,7 +216,6 @@ app.get("/", (req, res) => {
       </div>
     </div>
 
-    <!-- Main Workspace -->
     <div class="workspace">
       <div>
         <label for="prompt">AI Command Prompt</label>
@@ -187,18 +224,7 @@ app.get("/", (req, res) => {
 
       <div class="action-bar">
         <select id="model-select">
-          <optgroup label="✨ Free Models">
-            <option value="deepseek/deepseek-r1:free">[FREE] DeepSeek R1</option>
-            <option value="google/gemini-2.5-flash">[FREE] Gemini 2.5 Flash</option>
-            <option value="meta-llama/llama-3.3-70b-instruct:free">[FREE] Llama 3.3 70B</option>
-            <option value="google/gemini-flash-1.5">[FREE] Gemini Flash 1.5</option>
-          </optgroup>
-          <optgroup label="⚡ Paid Models">
-            <option value="anthropic/claude-3.5-sonnet">[PAID] Claude 3.5 Sonnet</option>
-            <option value="openai/gpt-4o">[PAID] OpenAI GPT-4o</option>
-            <option value="deepseek/deepseek-chat">[PAID] DeepSeek V3</option>
-            <option value="mistralai/mistral-large">[PAID] Mistral Large</option>
-          </optgroup>
+          <option value="">Loading all OpenRouter models...</option>
         </select>
         <button onclick="sendAICommand()">Execute Task</button>
       </div>
@@ -211,6 +237,30 @@ app.get("/", (req, res) => {
   </div>
 
   <script>
+    // Load complete OpenRouter model directory on page load
+    async function loadModels() {
+      const select = document.getElementById('model-select');
+      try {
+        const res = await fetch('/api/models');
+        const models = await res.json();
+        
+        if (models.length > 0) {
+          select.innerHTML = '';
+          models.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = \`\${m.isFree ? '[FREE] ' : '[PAID] '}\${m.name} (\${m.id})\`;
+            select.appendChild(opt);
+          });
+        } else {
+          select.innerHTML = '<option value="google/gemini-2.5-flash">[FREE] google/gemini-2.5-flash (Fallback)</option>';
+        }
+      } catch (e) {
+        select.innerHTML = '<option value="google/gemini-2.5-flash">[FREE] google/gemini-2.5-flash (Fallback)</option>';
+      }
+    }
+    loadModels();
+
     async function sendAICommand() {
       const promptText = document.getElementById('prompt').value;
       const model = document.getElementById('model-select').value;
