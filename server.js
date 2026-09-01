@@ -16,7 +16,6 @@ const mcpServer = new Server({
   capabilities: { tools: {} }
 });
 
-// Define all MCP tools available to the AI
 mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
@@ -36,7 +35,7 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "get_script_source",
-        description: "Decompiles or reads a LocalScript/ModuleScript by its path (e.g., game.Players.LocalPlayer.PlayerScripts.Script)",
+        description: "Decompiles or reads a LocalScript/ModuleScript by its path",
         inputSchema: {
           type: "object",
           properties: { path: { type: "string", description: "Instance path" } },
@@ -64,7 +63,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   delete commandResults[cmdId];
 
   return { content: [{ type: "text", text: typeof result.output === 'string' ? result.output : JSON.stringify(result.output) }] };
-};
+});
 
 let transport;
 app.get("/sse", async (req, res) => {
