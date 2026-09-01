@@ -14,12 +14,11 @@ let commandResults = {};
 
 const mcpServer = new Server({
   name: "delta-roblox-mcp",
-  version: "2.2.0",
+  version: "2.2.2",
 }, {
   capabilities: { tools: {} }
 });
 
-// Register all MCP tools including code-reading / decompiler tool
 mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
@@ -80,7 +79,6 @@ app.post("/messages", async (req, res) => {
   else res.status(400).send("No SSE connection");
 });
 
-// Delta Polling Endpoints
 app.get("/delta/poll", (req, res) => {
   res.json(pendingCommands);
   pendingCommands = [];
@@ -92,7 +90,6 @@ app.post("/delta/result", (req, res) => {
   res.json({ success: true });
 });
 
-// Mobile Safari Control Panel UI
 app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html>
 <html>
@@ -157,26 +154,36 @@ app.get("/delta/poll", (req, res, next) => {
   next();
 });
 
-// Gemini execution route using model function declaration / tool loops
 app.post('/ai-chat', async (req, res) => {
   const { prompt } = req.body;
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: `You are an expert Roblox Luau assistant. The user wants you to perform this task in their game: "${prompt}".
-If they want to execute code, format your Luau execution code inside standard markdown blocks (\`\`\`luau ... \`\`\`). 
-If they ask to look at a script path, output code that calls the script tool or print the instruction clearly.`,
+If they want to execute code, format your Luau execution code inside standard markdown blocks using triple backticks followed by luau.`,
     });
 
     const aiText = response.text;
-    const match = aiText.match(/
-http://googleusercontent.com/immersive_entry_chip/0
+    const match = aiText.match(/```(?:luau|lua)?([\s\S]*?)```/);
+    const codeToRun = match ? match[1].trim() : `print([[${aiText.replace(/"/g, '\\"')}]])`;
 
----
+    const cmdId = "cmd_" + Date.now();
+    pendingCommands.push({ id: cmdId, action: "execute_luau", payload: { code: codeToRun } });
 
-### Step 4: Final Setup Checklist
-1. Commit the `package.json` and `server.js` files to GitHub.
-2. Add your free **Google AI Studio API Key** to your Render environment variables as `GEMINI_API_KEY`.
-3. Hit **Manual Deploy** -> **Deploy latest commit** on Render.
-4. Execute the Luau script above inside Delta in your Roblox game.
-5. Open **`https://delta-mcp-server.onrender.com`** in **Safari on your iPhone** to access your dashboard and prompt Gemini to inspect code or run commands instantly.
+    let attempts = 0;
+    while (!commandResults[cmdId] && attempts < 30) {
+      await new Promise(r => setTimeout(r, 500));
+      attempts++;
+    }
+
+    const result = commandResults[cmdId] || { status: "timeout", output: "Execution timed out on iOS device" };
+    delete commandResults[cmdId];
+
+    res.json({ aiResponse: aiText, output: result.output });
+  } catch (err) {
+    res.status(500).json({ output: "Gemini API Error: " + err.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Gemini MCP Server running on port ${PORT}`));
