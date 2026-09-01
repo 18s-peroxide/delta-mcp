@@ -7,10 +7,9 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 const app = express();
 app.use(express.json());
 
-// Initialize OpenRouter (OpenAI-compatible client)
 const openrouter = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
-  apiKey: process.env.OPENROUTER_API_KEY,
+  apiKey: process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY,
   defaultHeaders: {
     "HTTP-Referer": "https://delta-mcp-controller.render.com",
     "X-Title": "Delta Roblox MCP Controller",
@@ -20,10 +19,11 @@ const openrouter = new OpenAI({
 let pendingCommands = [];
 let commandResults = {};
 let lastPollTime = 0;
+let clientInfo = { connected: false, username: "Not Connected", gameName: "Waiting...", iconUrl: "" };
 
 const mcpServer = new Server({
   name: "delta-roblox-mcp",
-  version: "3.0.0",
+  version: "3.1.0",
 }, {
   capabilities: { tools: {} }
 });
@@ -44,15 +44,6 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "get_workspace",
         description: "Dumps workspace hierarchy and children from Delta",
         inputSchema: { type: "object", properties: {} }
-      },
-      {
-        name: "get_script_source",
-        description: "Decompiles a LocalScript or ModuleScript by path to read its code",
-        inputSchema: {
-          type: "object",
-          properties: { path: { type: "string", description: "Instance path e.g. game.Players.LocalPlayer.PlayerScripts.Script" } },
-          required: ["path"]
-        }
       }
     ]
   };
@@ -88,8 +79,12 @@ app.post("/messages", async (req, res) => {
   else res.status(400).send("No SSE connection");
 });
 
-app.get("/delta/poll", (req, res) => {
+app.post("/delta/poll", (req, res) => {
   lastPollTime = Date.now();
+  const { username, gameName, iconUrl } = req.body || {};
+  if (username) {
+    clientInfo = { connected: true, username, gameName: gameName || "Unknown Game", iconUrl: iconUrl || "" };
+  }
   res.json(pendingCommands);
   pendingCommands = [];
 });
@@ -102,75 +97,116 @@ app.post("/delta/result", (req, res) => {
 
 app.get('/status-check', (req, res) => {
   const connected = (Date.now() - lastPollTime) < 8000;
-  res.json({ connected, lastSeen: lastPollTime });
+  if (!connected) clientInfo.connected = false;
+  res.json({ ...clientInfo, connected });
 });
 
-// Sleek, modern glassmorphism UI
+// Full UI Dashboard Layout
 app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Delta AI Controller | MCP Hub</title>
+  <title>Delta AI Controller | Advanced MCP Hub</title>
   <style>
     :root {
-      --bg: #09090b;
-      --card-bg: rgba(24, 24, 27, 0.7);
+      --bg: #0b0b0e;
+      --panel: #141419;
       --border: rgba(255, 255, 255, 0.08);
       --accent: #6366f1;
       --accent-hover: #4f46e5;
       --text: #f4f4f5;
-      --text-muted: #a1a1aa;
+      --text-muted: #94a3b8;
       --success: #10b981;
       --warning: #f59e0b;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background-color: var(--bg); color: var(--text); min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 20px; }
-    .container { width: 100%; max-width: 650px; background: var(--card-bg); backdrop-filter: blur(16px); border: 1px solid var(--border); border-radius: 16px; padding: 28px; box-shadow: 0 20px 40px rgba(0,0,0,0.5); }
-    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 16px; }
-    h2 { font-size: 20px; font-weight: 600; letter-spacing: -0.5px; }
-    .status-badge { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; background: rgba(255,255,255,0.03); padding: 6px 12px; border-radius: 20px; border: 1px solid var(--border); }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warning); transition: background 0.3s; }
-    .dot.connected { background: var(--success); box-shadow: 0 0 10px var(--success); }
-    label { display: block; font-size: 13px; font-weight: 500; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
-    textarea { width: 100%; height: 110px; background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--border); padding: 14px; border-radius: 10px; font-size: 14px; resize: none; outline: none; transition: border-color 0.2s; }
+    .dashboard { width: 100%; max-width: 850px; background: var(--panel); border: 1px solid var(--border); border-radius: 20px; padding: 32px; box-shadow: 0 25px 50px rgba(0,0,0,0.6); display: grid; grid-template-columns: 1fr; gap: 24px; }
+    header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 20px; }
+    h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+    
+    /* Telemetry Card */
+    .telemetry-card { background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 12px; padding: 16px; display: flex; align-items: center; gap: 16px; }
+    .game-icon { width: 56px; height: 56px; border-radius: 10px; background: #222; object-fit: cover; border: 1px solid var(--border); }
+    .telemetry-info { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+    .telemetry-row { display: flex; justify-content: space-between; align-items: center; }
+    .game-title { font-size: 16px; font-weight: 600; color: var(--text); }
+    .player-name { font-size: 13px; color: var(--text-muted); }
+    .status-badge { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,0.04); border: 1px solid var(--border); }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
+    .dot.connected { background: var(--success); box-shadow: 0 0 8px var(--success); }
+
+    /* Workspace & Controls */
+    .workspace { display: grid; grid-template-columns: 1fr; gap: 16px; }
+    label { display: block; font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+    textarea { width: 100%; height: 120px; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid var(--border); padding: 14px; border-radius: 12px; font-size: 14px; resize: none; outline: none; transition: border-color 0.2s; }
     textarea:focus { border-color: var(--accent); }
-    .controls { display: flex; gap: 12px; margin-top: 14px; }
-    select { background: rgba(0,0,0,0.3); color: var(--text); border: 1px solid var(--border); padding: 0 14px; border-radius: 10px; font-size: 14px; outline: none; cursor: pointer; }
-    button { flex: 1; background: var(--accent); color: #fff; border: none; padding: 14px; font-weight: 600; border-radius: 10px; cursor: pointer; transition: background 0.2s, transform 0.1s; font-size: 14px; }
+    
+    .action-bar { display: flex; gap: 12px; }
+    select { flex: 2; background: rgba(0,0,0,0.4); color: var(--text); border: 1px solid var(--border); padding: 0 14px; border-radius: 12px; font-size: 14px; outline: none; cursor: pointer; }
+    button { flex: 1; background: var(--accent); color: #fff; border: none; padding: 14px; font-weight: 600; border-radius: 12px; cursor: pointer; transition: background 0.2s, transform 0.1s; font-size: 14px; }
     button:hover { background: var(--accent-hover); }
     button:active { transform: scale(0.98); }
-    .output-container { margin-top: 24px; }
-    pre { background: rgba(0,0,0,0.4); color: #34d399; padding: 16px; border-radius: 10px; overflow-x: auto; max-height: 300px; border: 1px solid var(--border); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.5; }
+
+    /* Output Console */
+    .console-box { background: rgba(0,0,0,0.5); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+    pre { color: #34d399; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.5; overflow-x: auto; max-height: 250px; }
   </style>
 </head>
 <body>
-  <div class="container">
-    <div class="header">
-      <h2>Delta AI Controller</h2>
+  <div class="dashboard">
+    <header>
+      <h1>Delta AI Controller Hub</h1>
       <div class="status-badge">
         <div id="dot" class="dot"></div>
         <span id="status-text">Connecting...</span>
       </div>
-    </div>
-    
-    <div>
-      <label for="prompt">Command Prompt</label>
-      <textarea id="prompt" placeholder="e.g. Read workspace hierarchy or make my walkspeed 100..."></textarea>
-      <div class="controls">
-        <select id="model-select">
-          <option value="google/gemini-2.5-flash">Gemini 2.5 Flash</option>
-          <option value="anthropic/claude-3.5-sonnet">Claude 3.5 Sonnet</option>
-          <option value="deepseek/deepseek-r1:free">DeepSeek R1 (Free)</option>
-        </select>
-        <button onclick="sendAICommand()">Execute via MCP</button>
+    </header>
+
+    <!-- Roblox Telemetry Status Box -->
+    <div class="telemetry-card">
+      <img id="game-icon" class="game-icon" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23333' d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z'/%3E%3C/svg%3E" alt="Game Icon">
+      <div class="telemetry-info">
+        <div class="telemetry-row">
+          <span id="game-name" class="game-title">Waiting for game session...</span>
+        </div>
+        <div class="telemetry-row">
+          <span id="player-name" class="player-name">Player: --</span>
+        </div>
       </div>
     </div>
 
-    <div class="output-container">
-      <label>Execution Output</label>
-      <pre id="output">System ready for commands...</pre>
+    <!-- Main Workspace -->
+    <div class="workspace">
+      <div>
+        <label for="prompt">AI Command Prompt</label>
+        <textarea id="prompt" placeholder="Ask AI to manipulate workspace, run scripts, or get status..."></textarea>
+      </div>
+
+      <div class="action-bar">
+        <select id="model-select">
+          <optgroup label="✨ Free Models">
+            <option value="deepseek/deepseek-r1:free">[FREE] DeepSeek R1</option>
+            <option value="google/gemini-2.5-flash">[FREE] Gemini 2.5 Flash</option>
+            <option value="meta-llama/llama-3.3-70b-instruct:free">[FREE] Llama 3.3 70B</option>
+            <option value="google/gemini-flash-1.5">[FREE] Gemini Flash 1.5</option>
+          </optgroup>
+          <optgroup label="⚡ Paid Models">
+            <option value="anthropic/claude-3.5-sonnet">[PAID] Claude 3.5 Sonnet</option>
+            <option value="openai/gpt-4o">[PAID] OpenAI GPT-4o</option>
+            <option value="deepseek/deepseek-chat">[PAID] DeepSeek V3</option>
+            <option value="mistralai/mistral-large">[PAID] Mistral Large</option>
+          </optgroup>
+        </select>
+        <button onclick="sendAICommand()">Execute Task</button>
+      </div>
+
+      <div class="console-box">
+        <label>Execution Output & Telemetry Logs</label>
+        <pre id="output">System initialized. Awaiting commands...</pre>
+      </div>
     </div>
   </div>
 
@@ -181,8 +217,7 @@ app.get("/", (req, res) => {
       const outputEl = document.getElementById('output');
       
       if (!promptText.trim()) return;
-      
-      outputEl.innerText = "Processing request through OpenRouter...";
+      outputEl.innerText = "Dispatching command to OpenRouter model...";
       
       try {
         const res = await fetch('/ai-chat', {
@@ -203,9 +238,13 @@ app.get("/", (req, res) => {
         const data = await res.json();
         const dot = document.getElementById('dot');
         const text = document.getElementById('status-text');
+        
         if (data.connected) {
           dot.classList.add('connected');
-          text.innerText = "Delta iOS Online";
+          text.innerText = "Delta Connected";
+          document.getElementById('game-name').innerText = data.gameName;
+          document.getElementById('player-name').innerText = "Player: " + data.username;
+          if (data.iconUrl) document.getElementById('game-icon').src = data.iconUrl;
         } else {
           dot.classList.remove('connected');
           text.innerText = "Waiting for Delta...";
@@ -227,7 +266,7 @@ app.post('/ai-chat', async (req, res) => {
       messages: [
         {
           role: "system",
-          content: "You are an expert Roblox Luau automation assistant. The user wants to run scripts or control game elements via Delta on iOS. If they want to run code, format your executable code strictly inside standard markdown blocks using triple backticks with 'luau' or 'lua'."
+          content: "You are an expert Roblox Luau automation assistant. Format your executable script output strictly inside standard markdown blocks using triple backticks with 'luau' or 'lua'."
         },
         { role: "user", content: prompt }
       ]
