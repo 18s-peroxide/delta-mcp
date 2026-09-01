@@ -11,10 +11,11 @@ const ai = new GoogleGenAI({});
 
 let pendingCommands = [];
 let commandResults = {};
+let lastPollTime = 0;
 
 const mcpServer = new Server({
   name: "delta-roblox-mcp",
-  version: "2.2.2",
+  version: "2.2.3",
 }, {
   capabilities: { tools: {} }
 });
@@ -79,7 +80,9 @@ app.post("/messages", async (req, res) => {
   else res.status(400).send("No SSE connection");
 });
 
+// Delta Polling Endpoint (Updates lastPollTime instantly)
 app.get("/delta/poll", (req, res) => {
+  lastPollTime = Date.now();
   res.json(pendingCommands);
   pendingCommands = [];
 });
@@ -88,6 +91,11 @@ app.post("/delta/result", (req, res) => {
   const { id, status, output } = req.body;
   commandResults[id] = { status, output };
   res.json({ success: true });
+});
+
+app.get('/status-check', (req, res) => {
+  const connected = (Date.now() - lastPollTime) < 8000;
+  res.json({ connected, lastSeen: lastPollTime });
 });
 
 app.get("/", (req, res) => {
@@ -138,20 +146,10 @@ app.get("/", (req, res) => {
         document.getElementById('status').innerText = data.connected ? "Connected to Delta iOS" : "Waiting for Delta Client...";
         document.getElementById('status').style.color = data.connected ? "#00ffcc" : "yellow";
       } catch(e) {}
-    }, 3000);
+    }, 2000);
   </script>
 </body>
 </html>`);
-});
-
-let lastPollTime = Date.now();
-app.get('/status-check', (req, res) => {
-  res.json({ connected: (Date.now() - lastPollTime) < 5000 });
-});
-
-app.get("/delta/poll", (req, res, next) => {
-  lastPollTime = Date.now();
-  next();
 });
 
 app.post('/ai-chat', async (req, res) => {
