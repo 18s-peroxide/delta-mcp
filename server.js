@@ -1,4 +1,5 @@
 import express from "express";
+import { GoogleGenAI } from "@google/genai";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -6,16 +7,19 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 const app = express();
 app.use(express.json());
 
+const ai = new GoogleGenAI({});
+
 let pendingCommands = [];
 let commandResults = {};
 
 const mcpServer = new Server({
   name: "delta-roblox-mcp",
-  version: "2.0.0",
+  version: "2.2.0",
 }, {
   capabilities: { tools: {} }
 });
 
+// Register all MCP tools including code-reading / decompiler tool
 mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
@@ -30,15 +34,15 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "get_workspace",
-        description: "Dumps the workspace hierarchy and children for inspection",
+        description: "Dumps workspace hierarchy and children from Delta",
         inputSchema: { type: "object", properties: {} }
       },
       {
         name: "get_script_source",
-        description: "Decompiles or reads a LocalScript/ModuleScript by its path",
+        description: "Decompiles a LocalScript or ModuleScript by path to read its code",
         inputSchema: {
           type: "object",
-          properties: { path: { type: "string", description: "Instance path" } },
+          properties: { path: { type: "string", description: "Instance path e.g. game.Players.LocalPlayer.PlayerScripts.Script" } },
           required: ["path"]
         }
       }
@@ -59,7 +63,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     attempts++;
   }
 
-  const result = commandResults[cmdId] || { status: "timeout", output: "Execution timed out from iOS client" };
+  const result = commandResults[cmdId] || { status: "timeout", output: "Execution timed out on iOS device" };
   delete commandResults[cmdId];
 
   return { content: [{ type: "text", text: typeof result.output === 'string' ? result.output : JSON.stringify(result.output) }] };
@@ -76,6 +80,7 @@ app.post("/messages", async (req, res) => {
   else res.status(400).send("No SSE connection");
 });
 
+// Delta Polling Endpoints
 app.get("/delta/poll", (req, res) => {
   res.json(pendingCommands);
   pendingCommands = [];
@@ -87,5 +92,91 @@ app.post("/delta/result", (req, res) => {
   res.json({ success: true });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`MCP Server running on port ${PORT}`));
+// Mobile Safari Control Panel UI
+app.get("/", (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Delta Gemini MCP Controller</title>
+  <style>
+    body { background: #121212; color: #fff; font-family: sans-serif; padding: 15px; margin: 0; }
+    h2 { color: #4285F4; text-align: center; }
+    textarea { width: 100%; height: 90px; background: #1e1e1e; color: #fff; border: 1px solid #333; padding: 10px; border-radius: 5px; box-sizing: border-box; font-size: 15px; }
+    button { width: 100%; background: #4285F4; color: #fff; border: none; padding: 12px; font-weight: bold; border-radius: 5px; margin-top: 10px; font-size: 16px; }
+    pre { background: #1e1e1e; padding: 10px; border-radius: 5px; overflow-x: auto; max-height: 280px; border: 1px solid #333; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h2>Delta AI Controller (Gemini MCP)</h2>
+  <p>Status: <span id="status" style="color:yellow;">Checking connection...</span></p>
+  <label>Ask Gemini to control your game or read scripts:</label>
+  <textarea id="prompt" placeholder="e.g. Read the script at game.StarterPlayer.StarterPlayerScripts.ClientScript or make my walkspeed 100"></textarea>
+  <button onclick="sendAICommand()">Send to Gemini MCP</button>
+  <h3>Execution Output:</h3>
+  <pre id="output">Ready...</pre>
+
+  <script>
+    async function sendAICommand() {
+      const promptText = document.getElementById('prompt').value;
+      document.getElementById('output').innerText = "Gemini is processing your request via MCP...";
+      
+      try {
+        const res = await fetch('/ai-chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: promptText })
+        });
+        const data = await res.json();
+        document.getElementById('output').innerText = data.output || JSON.stringify(data);
+      } catch (err) {
+        document.getElementById('output').innerText = "Error: " + err;
+      }
+    }
+
+    setInterval(async () => {
+      try {
+        const res = await fetch('/status-check');
+        const data = await res.json();
+        document.getElementById('status').innerText = data.connected ? "Connected to Delta iOS" : "Waiting for Delta Client...";
+        document.getElementById('status').style.color = data.connected ? "#00ffcc" : "yellow";
+      } catch(e) {}
+    }, 3000);
+  </script>
+</body>
+</html>`);
+});
+
+let lastPollTime = Date.now();
+app.get('/status-check', (req, res) => {
+  res.json({ connected: (Date.now() - lastPollTime) < 5000 });
+});
+
+app.get("/delta/poll", (req, res, next) => {
+  lastPollTime = Date.now();
+  next();
+});
+
+// Gemini execution route using model function declaration / tool loops
+app.post('/ai-chat', async (req, res) => {
+  const { prompt } = req.body;
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: `You are an expert Roblox Luau assistant. The user wants you to perform this task in their game: "${prompt}".
+If they want to execute code, format your Luau execution code inside standard markdown blocks (\`\`\`luau ... \`\`\`). 
+If they ask to look at a script path, output code that calls the script tool or print the instruction clearly.`,
+    });
+
+    const aiText = response.text;
+    const match = aiText.match(/
+http://googleusercontent.com/immersive_entry_chip/0
+
+---
+
+### Step 4: Final Setup Checklist
+1. Commit the `package.json` and `server.js` files to GitHub.
+2. Add your free **Google AI Studio API Key** to your Render environment variables as `GEMINI_API_KEY`.
+3. Hit **Manual Deploy** -> **Deploy latest commit** on Render.
+4. Execute the Luau script above inside Delta in your Roblox game.
+5. Open **`https://delta-mcp-server.onrender.com`** in **Safari on your iPhone** to access your dashboard and prompt Gemini to inspect code or run commands instantly.
