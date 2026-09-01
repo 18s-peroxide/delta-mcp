@@ -7,7 +7,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 const app = express();
 app.use(express.json());
 
-const ai = new GoogleGenAI({});
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
 
 let pendingCommands = [];
 let commandResults = {};
