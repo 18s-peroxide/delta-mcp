@@ -7,8 +7,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 const app = express();
 app.use(express.json());
 
+// Explicitly pass the API key to prevent ADC lookup errors
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
 
 let pendingCommands = [];
 let commandResults = {};
@@ -16,7 +16,7 @@ let lastPollTime = 0;
 
 const mcpServer = new Server({
   name: "delta-roblox-mcp",
-  version: "2.2.6",
+  version: "2.2.7",
 }, {
   capabilities: { tools: {} }
 });
