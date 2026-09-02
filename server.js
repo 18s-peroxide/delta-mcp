@@ -24,7 +24,7 @@ let clientInfo = { connected: false, username: "Not Connected", gameName: "Waiti
 
 const mcpServer = new Server({
   name: "delta-roblox-mcp",
-  version: "3.4.0",
+  version: "3.5.0",
 }, {
   capabilities: { tools: {} }
 });
@@ -92,7 +92,7 @@ app.post("/delta/poll", (req, res) => {
 
 app.post("/delta/result", (req, res) => {
   const { id, status, output } = req.body;
-  commandResults[id] = { status, output };
+  commandResults[id] = { status, output: output !== undefined ? output : "Success (No return value)" };
   res.json({ success: true });
 });
 
@@ -102,7 +102,7 @@ app.get('/status-check', (req, res) => {
   res.json({ ...clientInfo, connected });
 });
 
-// Fetch OpenRouter Models & map LobeHub brand icon paths
+// Robust Icon Mapping & Model Catalog API
 app.get('/api/models', async (req, res) => {
   try {
     const response = await fetch("https://openrouter.ai/api/v1/models", {
@@ -120,13 +120,16 @@ app.get('/api/models', async (req, res) => {
       const parts = m.id.split('/');
       let brandSlug = parts.length > 1 ? parts[0].toLowerCase() : 'openai';
       
-      // Clean up common OpenRouter model prefixes for matching LobeHub icon directories
-      if (brandSlug === 'google') brandSlug = 'gemini';
-      if (brandSlug === 'meta-llama') brandSlug = 'meta';
-      if (brandSlug === 'mistralai') brandSlug = 'mistral';
+      // Standardize slug mapping for LobeHub static repository conventions
+      let iconSlug = brandSlug;
+      if (brandSlug === 'google' || brandSlug === 'gemini') iconSlug = 'google';
+      else if (brandSlug === 'meta-llama') iconSlug = 'meta';
+      else if (brandSlug === 'mistralai') iconSlug = 'mistral';
+      else if (brandSlug === 'anthropic') iconSlug = 'claude';
+      else if (brandSlug === 'deepseek') iconSlug = 'deepseek';
+      else if (brandSlug === 'openai') iconSlug = 'openai';
 
-      // LobeHub Dark-mode SVG Icon URL structure
-      let iconUrl = `https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static/icons/${brandSlug}-color.svg`;
+      let iconUrl = `https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static/icons/${iconSlug}-color.svg`;
 
       return {
         id: m.id,
@@ -144,7 +147,7 @@ app.get('/api/models', async (req, res) => {
   }
 });
 
-// Full-Screen Layout Dashboard
+// Full-Screen Workspace Dashboard UI
 app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="en">
@@ -173,10 +176,8 @@ app.get("/", (req, res) => {
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background-color: var(--bg); color: var(--text); height: 100vh; width: 100vw; display: flex; overflow: hidden; }
 
-    /* Full-Screen Workspace Layout */
     .app-layout { display: flex; width: 100%; height: 100%; }
 
-    /* Left Control Sidebar */
     sidebar { width: 440px; background: var(--sidebar-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 24px; gap: 20px; z-index: 10; flex-shrink: 0; overflow-y: auto; }
     
     header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 16px; }
@@ -196,7 +197,6 @@ app.get("/", (req, res) => {
     .control-group { display: flex; flex-direction: column; gap: 8px; }
     label { font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px; }
 
-    /* Custom Dropdown Styling */
     .custom-dropdown { position: relative; width: 100%; user-select: none; }
     .dropdown-select-btn { width: 100%; background: rgba(0,0,0,0.5); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; color: var(--text); display: flex; align-items: center; justify-content: space-between; cursor: pointer; font-size: 13px; transition: border-color 0.2s; }
     .dropdown-select-btn:hover { border-color: rgba(255,255,255,0.2); }
@@ -230,7 +230,6 @@ app.get("/", (req, res) => {
     button.execute-btn:hover { background: var(--accent-hover); }
     button.execute-btn:active { transform: scale(0.99); }
 
-    /* Right Full-Height Output Console Panel */
     main { flex: 1; background: var(--bg); display: flex; flex-direction: column; padding: 24px; gap: 16px; height: 100%; overflow: hidden; }
     .console-header { display: flex; justify-content: space-between; align-items: center; }
     .console-container { flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 20px; display: flex; flex-direction: column; overflow: hidden; box-shadow: inset 0 2px 10px rgba(0,0,0,0.5); }
@@ -242,7 +241,7 @@ app.get("/", (req, res) => {
     <sidebar>
       <header>
         <div class="logo-area">
-          <h1>Delta AI Hub <span>MCP v3.4</span></h1>
+          <h1>Delta AI Hub <span>MCP v3.5</span></h1>
         </div>
         <div class="status-badge">
           <div id="dot" class="dot"></div>
@@ -281,12 +280,12 @@ app.get("/", (req, res) => {
         </div>
       </div>
 
-      <button class="execute-btn" onclick="sendAICommand()">Execute Task</button>
+      <button class="execute-btn" id="exec-btn" onclick="sendAICommand()">Execute Task</button>
     </sidebar>
 
     <main>
       <div class="console-header">
-        <label>Execution Output & Telemetry Console</label>
+        <label>Execution Output & Live Telemetry Logs</label>
       </div>
       <div class="console-container">
         <pre id="output">System initialized. Awaiting commands...</pre>
@@ -305,9 +304,7 @@ app.get("/", (req, res) => {
         renderDropdownOptions(allModelsData);
         
         const defaultModel = allModelsData.find(m => m.id === selectedModelId) || allModelsData[0];
-        if (defaultModel) {
-          setSelectedModel(defaultModel);
-        }
+        if (defaultModel) setSelectedModel(defaultModel);
       } catch (e) {
         document.getElementById('selected-display').innerHTML = '<span>Failed to load models</span>';
       }
@@ -357,9 +354,7 @@ app.get("/", (req, res) => {
     function toggleDropdown() {
       const panel = document.getElementById('dropdown-panel');
       panel.classList.toggle('open');
-      if (panel.classList.contains('open')) {
-        document.getElementById('model-search').focus();
-      }
+      if (panel.classList.contains('open')) document.getElementById('model-search').focus();
     }
 
     function filterModels(query) {
@@ -379,9 +374,14 @@ app.get("/", (req, res) => {
     async function sendAICommand() {
       const promptText = document.getElementById('prompt').value;
       const outputEl = document.getElementById('output');
+      const btn = document.getElementById('exec-btn');
       
       if (!promptText.trim()) return;
-      outputEl.innerText = "Dispatching context-aware prompt to OpenRouter model...";
+      
+      btn.disabled = true;
+      
+      // Live Thinking Stages simulation in console
+      outputEl.innerText = "[STAGE 1/3] 🤖 Connecting to OpenRouter & packaging player telemetry context...";
       
       try {
         const res = await fetch('/ai-chat', {
@@ -389,10 +389,16 @@ app.get("/", (req, res) => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ prompt: promptText, model: selectedModelId })
         });
+        
+        outputEl.innerText = "[STAGE 2/3] ⚡ AI generated script. Dispatched command down to Delta polling bridge...";
+        
         const data = await res.json();
-        outputEl.innerText = data.output || JSON.stringify(data, null, 2);
+        
+        outputEl.innerText = \`[STAGE 3/3] ✔ Execution Complete.\\n\\n--- AI RAW THOUGHTS / RESPONSE ---\\n\${data.aiResponse || 'No response text'}\\n\\n--- DEVICE EXECUTION RESULT ---\\n\${data.output}\`;
       } catch (err) {
-        outputEl.innerText = "Error: " + err;
+        outputEl.innerText = "❌ Network / Processing Error: " + err;
+      } finally {
+        btn.disabled = false;
       }
     }
 
@@ -432,7 +438,7 @@ CURRENT LIVE TELEMETRY CONTEXT:
 - Connection Status: ${clientInfo.connected ? "Active" : "Disconnected"}
 
 The user wants you to perform this task: "${prompt}"
-Format your executable script output strictly inside standard markdown blocks using triple backticks with 'luau' or 'lua'.`;
+Format your executable script output strictly inside standard markdown blocks using triple backticks with 'luau' or 'lua'. If no script is needed, output plain text response.`;
 
     const completion = await openrouter.chat.completions.create({
       model: selectedModel,
@@ -442,7 +448,7 @@ Format your executable script output strictly inside standard markdown blocks us
       ]
     });
 
-    const aiText = completion.choices[0].message.content;
+    const aiText = completion.choices[0]?.message?.content || "No response received from model.";
     const match = aiText.match(/```(?:luau|lua)?([\s\S]*?)```/);
     const codeToRun = match ? match[1].trim() : `print([[${aiText.replace(/"/g, '\\"')}]])`;
 
@@ -450,18 +456,18 @@ Format your executable script output strictly inside standard markdown blocks us
     pendingCommands.push({ id: cmdId, action: "execute_luau", payload: { code: codeToRun } });
 
     let attempts = 0;
-    while (!commandResults[cmdId] && attempts < 30) {
+    while (!commandResults[cmdId] && attempts < 35) {
       await new Promise(r => setTimeout(r, 500));
       attempts++;
     }
 
-    const result = commandResults[cmdId] || { status: "timeout", output: "Execution timed out on iOS device" };
+    const result = commandResults[cmdId] || { status: "timeout", output: "Execution timed out on iOS device (Delta did not poll back result in time)" };
     delete commandResults[cmdId];
 
     res.json({ aiResponse: aiText, output: result.output });
   } catch (err) {
     console.error("OpenRouter Route Error:", err);
-    res.status(500).json({ output: "OpenRouter API Error: " + err.message });
+    res.status(500).json({ aiResponse: "Error", output: "OpenRouter API Error: " + err.message });
   }
 });
 
