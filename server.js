@@ -2855,9 +2855,9 @@ async function sendMessage() {
     } catch (error) {
 
         addMessage(
-            "ai",
-            `Request failed: ${error.message}`
-        );
+    "ai",
+    "Request failed: " + error.message
+);
 
     } finally {
 
