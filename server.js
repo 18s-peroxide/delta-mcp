@@ -24,7 +24,7 @@ let clientInfo = { connected: false, username: "Not Connected", gameName: "Waiti
 
 const mcpServer = new Server({
   name: "delta-roblox-mcp",
-  version: "3.3.0",
+  version: "3.4.0",
 }, {
   capabilities: { tools: {} }
 });
@@ -102,7 +102,7 @@ app.get('/status-check', (req, res) => {
   res.json({ ...clientInfo, connected });
 });
 
-// Fetch OpenRouter Models & map brand/LobeHub metadata
+// Fetch OpenRouter Models & map LobeHub brand icon paths
 app.get('/api/models', async (req, res) => {
   try {
     const response = await fetch("https://openrouter.ai/api/v1/models", {
@@ -118,10 +118,15 @@ app.get('/api/models', async (req, res) => {
       const isFree = promptPrice === 0 && completionPrice === 0;
       
       const parts = m.id.split('/');
-      const brandSlug = parts.length > 1 ? parts[0].toLowerCase() : 'openai';
+      let brandSlug = parts.length > 1 ? parts[0].toLowerCase() : 'openai';
       
-      // LobeHub Icon Mapping
-      let iconUrl = `https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static/icons/${brandSlug}.svg`;
+      // Clean up common OpenRouter model prefixes for matching LobeHub icon directories
+      if (brandSlug === 'google') brandSlug = 'gemini';
+      if (brandSlug === 'meta-llama') brandSlug = 'meta';
+      if (brandSlug === 'mistralai') brandSlug = 'mistral';
+
+      // LobeHub Dark-mode SVG Icon URL structure
+      let iconUrl = `https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static/icons/${brandSlug}-color.svg`;
 
       return {
         id: m.id,
@@ -139,7 +144,7 @@ app.get('/api/models', async (req, res) => {
   }
 });
 
-// Full UI Dashboard Layout
+// Full-Screen Layout Dashboard
 app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="en">
@@ -149,14 +154,15 @@ app.get("/", (req, res) => {
   <title>Delta AI Controller | MCP Command Hub</title>
   <style>
     :root {
-      --bg: #09090b;
-      --panel: #121216;
-      --panel-hover: #1a1a22;
+      --bg: #050507;
+      --sidebar-bg: #0b0b0f;
+      --panel: #111116;
+      --panel-hover: #181820;
       --border: rgba(255, 255, 255, 0.08);
       --accent: #6366f1;
       --accent-hover: #4f46e5;
       --text: #f4f4f5;
-      --text-muted: #a1a1aa;
+      --text-muted: #9494a0;
       --success: #10b981;
       --warning: #f59e0b;
       --free-bg: rgba(16, 185, 129, 0.12);
@@ -165,123 +171,127 @@ app.get("/", (req, res) => {
       --paid-text: #60a5fa;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    body { background-color: var(--bg); color: var(--text); min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 24px; }
-    
-    .app-container { width: 100%; max-width: 1000px; background: var(--panel); border: 1px solid var(--border); border-radius: 24px; padding: 36px; box-shadow: 0 30px 60px rgba(0,0,0,0.7); display: flex; flex-direction: column; gap: 24px; }
-    
-    header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 20px; }
-    .logo-area h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.5px; display: flex; align-items: center; gap: 10px; }
-    .logo-area span { font-size: 12px; background: rgba(99,102,241,0.15); color: #818cf8; padding: 3px 8px; border-radius: 6px; font-weight: 500; }
+    body { background-color: var(--bg); color: var(--text); height: 100vh; width: 100vw; display: flex; overflow: hidden; }
 
-    .status-badge { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; padding: 6px 14px; border-radius: 20px; background: rgba(255,255,255,0.03); border: 1px solid var(--border); }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warning); }
-    .dot.connected { background: var(--success); box-shadow: 0 0 10px var(--success); }
+    /* Full-Screen Workspace Layout */
+    .app-layout { display: flex; width: 100%; height: 100%; }
 
-    .telemetry-card { background: rgba(0,0,0,0.35); border: 1px solid var(--border); border-radius: 14px; padding: 18px; display: flex; align-items: center; gap: 18px; }
-    .game-icon { width: 60px; height: 60px; border-radius: 12px; background: #1a1a22; object-fit: cover; border: 1px solid var(--border); }
-    .telemetry-info { flex: 1; display: flex; flex-direction: column; gap: 6px; }
-    .game-title { font-size: 17px; font-weight: 600; color: var(--text); }
-    .player-name { font-size: 13px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
-
-    .workspace-grid { display: grid; grid-template-columns: 1fr; gap: 20px; }
-    label { display: block; font-size: 11px; font-weight: 700; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.8px; }
+    /* Left Control Sidebar */
+    sidebar { width: 440px; background: var(--sidebar-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 24px; gap: 20px; z-index: 10; flex-shrink: 0; overflow-y: auto; }
     
-    .control-row { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; align-items: center; }
-    @media(max-width: 768px) { .control-row { grid-template-columns: 1fr; } }
+    header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 16px; }
+    .logo-area h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.5px; display: flex; align-items: center; gap: 8px; }
+    .logo-area span { font-size: 11px; background: rgba(99,102,241,0.15); color: #818cf8; padding: 2px 6px; border-radius: 6px; font-weight: 500; }
+
+    .status-badge { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 20px; background: rgba(255,255,255,0.03); border: 1px solid var(--border); }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
+    .dot.connected { background: var(--success); box-shadow: 0 0 8px var(--success); }
+
+    .telemetry-card { background: rgba(0,0,0,0.35); border: 1px solid var(--border); border-radius: 12px; padding: 14px; display: flex; align-items: center; gap: 14px; }
+    .game-icon { width: 50px; height: 50px; border-radius: 10px; background: #1a1a22; object-fit: cover; border: 1px solid var(--border); }
+    .telemetry-info { flex: 1; display: flex; flex-direction: column; gap: 4px; overflow: hidden; }
+    .game-title { font-size: 15px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .player-name { font-size: 12px; color: var(--text-muted); }
+
+    .control-group { display: flex; flex-direction: column; gap: 8px; }
+    label { font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px; }
 
     /* Custom Dropdown Styling */
     .custom-dropdown { position: relative; width: 100%; user-select: none; }
-    .dropdown-select-btn { width: 100%; background: rgba(0,0,0,0.5); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; color: var(--text); display: flex; align-items: center; justify-content: space-between; cursor: pointer; font-size: 14px; transition: border-color 0.2s; }
+    .dropdown-select-btn { width: 100%; background: rgba(0,0,0,0.5); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; color: var(--text); display: flex; align-items: center; justify-content: space-between; cursor: pointer; font-size: 13px; transition: border-color 0.2s; }
     .dropdown-select-btn:hover { border-color: rgba(255,255,255,0.2); }
     .selected-value { display: flex; align-items: center; gap: 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-    .selected-value img { width: 20px; height: 20px; object-fit: contain; }
+    .selected-value img { width: 18px; height: 18px; object-fit: contain; }
 
-    .dropdown-panel { position: absolute; top: calc(100% + 6px); left: 0; width: 100%; background: #16161b; border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 20px 40px rgba(0,0,0,0.8); z-index: 100; display: none; flex-direction: column; max-height: 320px; overflow: hidden; }
+    .dropdown-panel { position: absolute; bottom: calc(100% + 6px); left: 0; width: 100%; background: #15151b; border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 -20px 40px rgba(0,0,0,0.8); z-index: 100; display: none; flex-direction: column; max-height: 320px; overflow: hidden; }
     .dropdown-panel.open { display: flex; }
     
-    .dropdown-search-box { padding: 12px; border-bottom: 1px solid var(--border); background: #121216; }
-    .dropdown-search-box input { width: 100%; background: rgba(0,0,0,0.4); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; color: var(--text); font-size: 13px; outline: none; }
+    .dropdown-search-box { padding: 10px; border-bottom: 1px solid var(--border); background: #0f0f13; }
+    .dropdown-search-box input { width: 100%; background: rgba(0,0,0,0.4); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; color: var(--text); font-size: 12px; outline: none; }
     .dropdown-search-box input:focus { border-color: var(--accent); }
 
-    .dropdown-options-list { overflow-y: auto; max-height: 240px; padding: 6px; }
-    .brand-group-title { font-size: 10px; font-weight: 700; color: var(--text-muted); padding: 8px 10px 4px 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .dropdown-options-list { overflow-y: auto; max-height: 240px; padding: 4px; }
+    .brand-group-title { font-size: 10px; font-weight: 700; color: var(--text-muted); padding: 8px 8px 4px 8px; text-transform: uppercase; letter-spacing: 0.5px; }
     
-    .dropdown-option { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-radius: 8px; cursor: pointer; transition: background 0.15s; }
+    .dropdown-option { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: 6px; cursor: pointer; transition: background 0.15s; }
     .dropdown-option:hover { background: var(--panel-hover); }
-    .opt-left { display: flex; align-items: center; gap: 10px; overflow: hidden; }
-    .opt-left img { width: 18px; height: 18px; object-fit: contain; flex-shrink: 0; }
-    .opt-name { font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .opt-left { display: flex; align-items: center; gap: 8px; overflow: hidden; }
+    .opt-left img { width: 16px; height: 16px; object-fit: contain; flex-shrink: 0; }
+    .opt-name { font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     
-    .badge { font-size: 10px; font-weight: 700; padding: 3px 7px; border-radius: 6px; text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
+    .badge { font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
     .badge.free { background: var(--free-bg); color: var(--free-text); }
     .badge.paid { background: var(--paid-bg); color: var(--paid-text); }
 
-    textarea { width: 100%; height: 130px; background: rgba(0,0,0,0.5); color: var(--text); border: 1px solid var(--border); padding: 16px; border-radius: 14px; font-size: 14px; resize: none; outline: none; transition: border-color 0.2s; line-height: 1.5; }
+    textarea { width: 100%; height: 140px; background: rgba(0,0,0,0.5); color: var(--text); border: 1px solid var(--border); padding: 14px; border-radius: 12px; font-size: 13px; resize: none; outline: none; transition: border-color 0.2s; line-height: 1.5; }
     textarea:focus { border-color: var(--accent); }
 
-    button.execute-btn { background: var(--accent); color: #fff; border: none; padding: 14px; font-weight: 600; border-radius: 14px; cursor: pointer; transition: background 0.2s, transform 0.1s; font-size: 14px; width: 100%; }
+    button.execute-btn { background: var(--accent); color: #fff; border: none; padding: 13px; font-weight: 600; border-radius: 12px; cursor: pointer; transition: background 0.2s, transform 0.1s; font-size: 13px; width: 100%; margin-top: 4px; }
     button.execute-btn:hover { background: var(--accent-hover); }
     button.execute-btn:active { transform: scale(0.99); }
 
-    .console-box { background: rgba(0,0,0,0.6); border: 1px solid var(--border); border-radius: 14px; padding: 18px; }
-    pre { color: #34d399; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.6; overflow-x: auto; max-height: 260px; }
+    /* Right Full-Height Output Console Panel */
+    main { flex: 1; background: var(--bg); display: flex; flex-direction: column; padding: 24px; gap: 16px; height: 100%; overflow: hidden; }
+    .console-header { display: flex; justify-content: space-between; align-items: center; }
+    .console-container { flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 20px; display: flex; flex-direction: column; overflow: hidden; box-shadow: inset 0 2px 10px rgba(0,0,0,0.5); }
+    pre { color: #34d399; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.6; overflow-y: auto; flex: 1; white-space: pre-wrap; word-break: break-all; }
   </style>
 </head>
 <body>
-  <div class="app-container">
-    <header>
-      <div class="logo-area">
-        <h1>Delta AI Hub <span>MCP v3.3</span></h1>
-      </div>
-      <div class="status-badge">
-        <div id="dot" class="dot"></div>
-        <span id="status-text">Connecting...</span>
-      </div>
-    </header>
+  <div class="app-layout">
+    <sidebar>
+      <header>
+        <div class="logo-area">
+          <h1>Delta AI Hub <span>MCP v3.4</span></h1>
+        </div>
+        <div class="status-badge">
+          <div id="dot" class="dot"></div>
+          <span id="status-text">Connecting...</span>
+        </div>
+      </header>
 
-    <div class="telemetry-card">
-      <img id="game-icon" class="game-icon" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23333' d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z'/%3E%3C/svg%3E" alt="Game Icon">
-      <div class="telemetry-info">
-        <span id="game-name" class="game-title">Waiting for session...</span>
-        <span id="player-name" class="player-name">Player: --</span>
+      <div class="telemetry-card">
+        <img id="game-icon" class="game-icon" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23333' d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z'/%3E%3C/svg%3E" alt="Game Icon">
+        <div class="telemetry-info">
+          <span id="game-name" class="game-title">Waiting for session...</span>
+          <span id="player-name" class="player-name">Player: --</span>
+        </div>
       </div>
-    </div>
 
-    <div class="workspace-grid">
-      <div>
+      <div class="control-group">
         <label for="prompt">AI Task Prompt</label>
         <textarea id="prompt" placeholder="Ask AI to write auto-collectors, inspect workspace, or manipulate game state..."></textarea>
       </div>
 
-      <div class="control-row">
-        <div>
-          <label>Select AI Model</label>
-          <div class="custom-dropdown" id="model-dropdown">
-            <div class="dropdown-select-btn" onclick="toggleDropdown()">
-              <div class="selected-value" id="selected-display">
-                <span>Loading complete catalog...</span>
-              </div>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+      <div class="control-group">
+        <label>Select AI Model</label>
+        <div class="custom-dropdown" id="model-dropdown">
+          <div class="dropdown-select-btn" onclick="toggleDropdown()">
+            <div class="selected-value" id="selected-display">
+              <span>Loading complete catalog...</span>
             </div>
-            <div class="dropdown-panel" id="dropdown-panel">
-              <div class="dropdown-search-box">
-                <input type="text" id="model-search" placeholder="Search models or brands..." oninput="filterModels(this.value)">
-              </div>
-              <div class="dropdown-options-list" id="options-list"></div>
-            </div>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 15l6-6 6 6"/></svg>
           </div>
-        </div>
-        <div>
-          <label>&nbsp;</label>
-          <button class="execute-btn" onclick="sendAICommand()">Execute Task</button>
+          <div class="dropdown-panel" id="dropdown-panel">
+            <div class="dropdown-search-box">
+              <input type="text" id="model-search" placeholder="Search models or brands..." oninput="filterModels(this.value)">
+            </div>
+            <div class="dropdown-options-list" id="options-list"></div>
+          </div>
         </div>
       </div>
 
-      <div class="console-box">
-        <label>Execution Output & Telemetry Logs</label>
+      <button class="execute-btn" onclick="sendAICommand()">Execute Task</button>
+    </sidebar>
+
+    <main>
+      <div class="console-header">
+        <label>Execution Output & Telemetry Console</label>
+      </div>
+      <div class="console-container">
         <pre id="output">System initialized. Awaiting commands...</pre>
       </div>
-    </div>
+    </main>
   </div>
 
   <script>
@@ -294,7 +304,6 @@ app.get("/", (req, res) => {
         allModelsData = await res.json();
         renderDropdownOptions(allModelsData);
         
-        // Default selection handler
         const defaultModel = allModelsData.find(m => m.id === selectedModelId) || allModelsData[0];
         if (defaultModel) {
           setSelectedModel(defaultModel);
@@ -308,7 +317,6 @@ app.get("/", (req, res) => {
       const listEl = document.getElementById('options-list');
       listEl.innerHTML = '';
 
-      // Group models by Brand
       const grouped = {};
       models.forEach(m => {
         if (!grouped[m.brand]) grouped[m.brand] = [];
@@ -328,7 +336,7 @@ app.get("/", (req, res) => {
           
           opt.innerHTML = \`
             <div class="opt-left">
-              <img src="\${m.iconUrl}" onerror="this.src='https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static/icons/openai.svg'" alt="">
+              <img src="\${m.iconUrl}" onerror="this.src='https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static/icons/openai-color.svg'" alt="">
               <span class="opt-name" title="\${m.id}">\${m.name}</span>
             </div>
             <span class="badge \${m.isFree ? 'free' : 'paid'}">\${m.isFree ? 'Free' : 'Paid'}</span>
@@ -341,7 +349,7 @@ app.get("/", (req, res) => {
     function setSelectedModel(m) {
       selectedModelId = m.id;
       document.getElementById('selected-display').innerHTML = \`
-        <img src="\${m.iconUrl}" onerror="this.src='https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static/icons/openai.svg'" alt="">
+        <img src="\${m.iconUrl}" onerror="this.src='https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static/icons/openai-color.svg'" alt="">
         <span>\${m.name}</span>
       \`;
     }
@@ -360,7 +368,6 @@ app.get("/", (req, res) => {
       renderDropdownOptions(filtered);
     }
 
-    // Close dropdown on outside click
     window.onclick = function(event) {
       if (!event.target.closest('#model-dropdown')) {
         document.getElementById('dropdown-panel').classList.remove('open');
