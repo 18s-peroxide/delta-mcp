@@ -1,6 +1,7 @@
 {
   "name": "delta-roblox-mcp",
   "version": "3.0.0",
+  "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
