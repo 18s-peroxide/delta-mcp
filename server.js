@@ -1,2509 +1,2983 @@
-import express from "express";
-import OpenAI from "openai";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema
-} from "@modelcontextprotocol/sdk/types.js";
+// ============================================================
+// DELTA AI HUB
+// Full Express + MCP + OpenRouter Dashboard
+// ============================================================
+
+const express = require("express");
+const OpenAI = require("openai");
+
+const {
+    Server
+} = require("@modelcontextprotocol/sdk/server/index.js");
+
+const {
+    SSEServerTransport
+} = require("@modelcontextprotocol/sdk/server/sse.js");
+
+const {
+    CallToolRequestSchema,
+    ListToolsRequestSchema
+} = require("@modelcontextprotocol/sdk/types.js");
 
 const app = express();
 
-app.use(express.json({ limit: "1mb" }));
+const PORT = process.env.PORT || 3000;
+
+app.use(express.json({
+    limit: "1mb"
+}));
+
 
 // ============================================================
 // CONFIG
 // ============================================================
 
-const apiKey =
-  process.env.OPENROUTER_API_KEY ||
-  process.env.OPENAI_API_KEY;
+const OPENROUTER_MODELS_URL =
+    "https://openrouter.ai/api/v1/models";
 
-const openrouter = new OpenAI({
-  baseURL: "https://openrouter.ai/api/v1",
-  apiKey,
-  defaultHeaders: {
-    "HTTP-Referer": "https://delta-mcp-controller.render.com",
-    "X-Title": "Delta Roblox MCP Controller"
-  }
-});
-
-// ============================================================
-// STATE
-// ============================================================
-
-let pendingCommands = [];
-let commandResults = {};
-
-let lastPollTime = 0;
+const OPENROUTER_CHAT_URL =
+    "https://openrouter.ai/api/v1/chat/completions";
 
 const CONNECTION_TIMEOUT = 8000;
 
-let clientInfo = {
-  connected: false,
-  username: "",
-  gameName: "",
-  iconUrl: ""
-};
+const LOBE_ICON_CDN =
+    "https://unpkg.com/@lobehub/icons-static-svg@latest/icons/";
+
+const LOBE_ICON_MIRROR =
+    "https://registry.npmmirror.com/@lobehub/icons-static-svg/latest/files/icons/";
+
 
 // ============================================================
-// LIVE CLIENT STATE
+// DELTA CLIENT STATE
+// ============================================================
+
+let clientInfo = {
+    connected: false,
+    username: "",
+    userId: "",
+    gameName: "",
+    gameId: "",
+    placeId: "",
+    gameIcon: "",
+    avatar: "",
+    lastPollTime: 0
+};
+
+let pendingCommands = [];
+let commandResults = new Map();
+
+let commandCounter = 0;
+
+
+// ============================================================
+// CONNECTION HELPERS
 // ============================================================
 
 function isClientConnected() {
-  return (
-    lastPollTime > 0 &&
-    Date.now() - lastPollTime < CONNECTION_TIMEOUT
-  );
+    if (!clientInfo.lastPollTime) {
+        return false;
+    }
+
+    return (
+        Date.now() - clientInfo.lastPollTime
+    ) < CONNECTION_TIMEOUT;
 }
+
 
 function getLiveClientInfo() {
-  if (!isClientConnected()) {
-    return {
-      connected: false,
-      username: "",
-      gameName: "",
-      iconUrl: ""
-    };
-  }
 
-  return {
-    connected: true,
-    username: clientInfo.username || "",
-    gameName: clientInfo.gameName || "",
-    iconUrl: clientInfo.iconUrl || ""
-  };
+    if (!isClientConnected()) {
+        return {
+            connected: false,
+            username: "",
+            userId: "",
+            gameName: "",
+            gameId: "",
+            placeId: "",
+            gameIcon: "",
+            avatar: ""
+        };
+    }
+
+    return {
+        connected: true,
+        username: clientInfo.username || "",
+        userId: clientInfo.userId || "",
+        gameName: clientInfo.gameName || "",
+        gameId: clientInfo.gameId || "",
+        placeId: clientInfo.placeId || "",
+        gameIcon: clientInfo.gameIcon || "",
+        avatar: clientInfo.avatar || ""
+    };
 }
+
 
 function clearDisconnectedClient() {
-  clientInfo = {
-    connected: false,
-    username: "",
-    gameName: "",
-    iconUrl: ""
-  };
+
+    if (isClientConnected()) {
+        return;
+    }
+
+    clientInfo = {
+        connected: false,
+        username: "",
+        userId: "",
+        gameName: "",
+        gameId: "",
+        placeId: "",
+        gameIcon: "",
+        avatar: "",
+        lastPollTime: 0
+    };
 }
 
+
+// Periodically remove stale telemetry.
+setInterval(() => {
+    clearDisconnectedClient();
+}, 1000);
+
+
 // ============================================================
-// MCP SERVER
+// SAFE STRING HELPERS
 // ============================================================
 
-const mcpServer = new Server(
-  {
-    name: "delta-roblox-mcp",
-    version: "3.6.0"
-  },
-  {
-    capabilities: {
-      tools: {}
+function cleanString(value, maxLength = 500) {
+
+    if (value === undefined || value === null) {
+        return "";
     }
-  }
-);
 
-mcpServer.setRequestHandler(
-  ListToolsRequestSchema,
-  async () => {
-    return {
-      tools: [
-        {
-          name: "execute_luau",
-          description:
-            "Executes raw Luau script inside Delta on iOS",
-          inputSchema: {
-            type: "object",
-            properties: {
-              code: {
-                type: "string",
-                description: "Luau code to run"
-              }
-            },
-            required: ["code"]
-          }
-        },
+    return String(value)
+        .replace(/\0/g, "")
+        .slice(0, maxLength);
+}
 
-        {
-          name: "get_workspace",
-          description:
-            "Dumps workspace hierarchy and children from Delta",
-          inputSchema: {
-            type: "object",
-            properties: {}
-          }
-        }
-      ]
-    };
-  }
-);
 
-mcpServer.setRequestHandler(
-  CallToolRequestSchema,
-  async request => {
-    const toolName = request.params.name;
-    const args = request.params.arguments || {};
+function normalizeProvider(value) {
 
-    const cmdId = "cmd_" + Date.now();
+    return String(value || "")
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, "-")
+        .replace(/_/g, "-");
+}
 
-    pendingCommands.push({
-      id: cmdId,
-      action: toolName,
-      payload: args
-    });
 
-    let attempts = 0;
+// ============================================================
+// LOBEHUB ICON MAP
+// ============================================================
+//
+// IMPORTANT:
+// We deliberately map PROVIDERS, not model families.
+//
+// Bad:
+//   "llama" -> Meta
+//
+// Good:
+//   "meta-llama/..." -> Meta
+//   "aion-labs/..."  -> AionLabs
+//   "cognitive/..."  -> Deep Cogito
+//
+// This prevents unrelated providers from inheriting another
+// company's logo.
+// ============================================================
 
-    while (
-      !commandResults[cmdId] &&
-      attempts < 30
+const PROVIDER_ICON_MAP = {
+
+    // OpenAI
+    "openai": "openai",
+
+    // Anthropic
+    //
+    // This is intentionally ANTHROPIC, not CLAUDE.
+    // The user-facing provider logo should be Anthropic's
+    // stylized A mark.
+    "anthropic": "anthropic",
+
+    // Google
+    "google": "google",
+    "google-ai": "google",
+    "google-ai-studio": "google",
+
+    // Meta
+    "meta": "meta",
+    "meta-llama": "meta",
+
+    // Mistral
+    "mistral": "mistral",
+    "mistralai": "mistral",
+
+    // DeepSeek
+    "deepseek": "deepseek",
+
+    // Qwen
+    "qwen": "qwen",
+    "alibaba": "qwen",
+    "alibaba-cloud": "qwen",
+
+    // Cohere
+    "cohere": "cohere",
+
+    // xAI
+    "x-ai": "xai",
+    "xai": "xai",
+
+    // Groq
+    "groq": "groq",
+
+    // Perplexity
+    "perplexity": "perplexity",
+
+    // Microsoft
+    "microsoft": "microsoft",
+
+    // NVIDIA
+    "nvidia": "nvidia",
+
+    // Amazon
+    "amazon": "aws",
+    "amazon-bedrock": "aws",
+
+    // AI21
+    "ai21": "ai21",
+    "ai21-labs": "ai21",
+
+    // Together
+    "together": "together",
+    "together-ai": "together",
+
+    // Fireworks
+    "fireworks": "fireworks",
+
+    // Moonshot
+    "moonshot": "moonshot",
+    "moonshotai": "moonshot",
+
+    // MiniMax
+    "minimax": "minimax",
+    "minimaxai": "minimax",
+
+    // Zhipu / Z-AI
+    "zhipuai": "zhipu",
+    "zhipu": "zhipu",
+    "z-ai": "z-ai",
+    "zai": "z-ai",
+
+    // 01.AI
+    "01-ai": "01-ai",
+    "01ai": "01-ai",
+
+    // Baichuan
+    "baichuan": "baichuan",
+
+    // ByteDance
+    "bytedance": "bytedance",
+
+    // Doubao
+    "doubao": "doubao",
+
+    // StepFun
+    "stepfun": "stepfun",
+
+    // Databricks
+    "databricks": "dbrx",
+
+    // AI2
+    "ai2": "ai2",
+
+    // Inflection
+    "inflection": "inflection",
+
+    // Reka
+    "reka": "reka",
+
+    // Liquid
+    "liquid": "liquid",
+
+    // Nous
+    "nousresearch": "nousresearch",
+    "nous-research": "nousresearch",
+    "nous": "nousresearch",
+
+    // Cloudflare
+    "cloudflare": "cloudflare",
+
+    // OpenRouter
+    "openrouter": "openrouter",
+
+    // Tencent
+    "tencent": "tencent",
+
+    // Xiaomi
+    "xiaomi": "xiaomi",
+
+    // Ling
+    "ling": "ling",
+
+    // Poolside
+    "poolside": "poolside",
+
+    // KWAIPilot
+    "kwaipilot": "kwaipilot",
+
+    // AionLabs
+    //
+    // NEVER map this to Meta.
+    "aionlabs": "aionlabs",
+    "aion-labs": "aionlabs",
+
+    // Cognitive / Deep Cogito
+    //
+    // NEVER map this to Mistral.
+    "cognitive": "deep-cogito",
+    "cogito": "deep-cogito",
+    "deepcogito": "deep-cogito",
+    "deep-cogito": "deep-cogito",
+
+    // Sao10K
+    "sao10k": "sao10k",
+
+    // Alpindale
+    "alpindale": "alpindale",
+
+    // Undi95
+    "undi95": "undi95",
+
+    // Mancer
+    "mancer": "mancer",
+
+    // NeverSleep
+    "neversleep": "neversleep",
+
+    // TheDrummer
+    "thedrummer": "thedrummer"
+};
+
+
+// ============================================================
+// SPECIAL PROVIDER ALIASES
+// ============================================================
+
+const PROVIDER_ALIASES = {
+
+    "aion-labs": "aionlabs",
+    "aion_labs": "aionlabs",
+
+    "deep-cogito": "deep-cogito",
+    "deep_cogito": "deep-cogito",
+
+    "meta-llama": "meta-llama",
+
+    "moonshot-ai": "moonshotai",
+
+    "z-ai": "z-ai",
+
+    "ai21-labs": "ai21",
+
+    "together-ai": "together"
+};
+
+
+// ============================================================
+// MODEL ID -> PROVIDER
+// ============================================================
+//
+// OpenRouter model IDs normally look like:
+//
+//   openai/gpt-5
+//   anthropic/claude-3.7-sonnet
+//   meta-llama/llama-3.3-70b
+//   aion-labs/... 
+//
+// The FIRST segment is therefore much safer than trying to
+// determine a company from the model's name.
+// ============================================================
+
+function getProviderFromModelId(modelId) {
+
+    const id = String(modelId || "")
+        .trim()
+        .toLowerCase();
+
+    if (!id) {
+        return "";
+    }
+
+    const slashIndex = id.indexOf("/");
+
+    if (slashIndex !== -1) {
+
+        let provider =
+            id.slice(0, slashIndex);
+
+        provider =
+            PROVIDER_ALIASES[provider] ||
+            provider;
+
+        return provider;
+    }
+
+    return "";
+}
+
+
+// ============================================================
+// MODEL ICON SLUG
+// ============================================================
+
+function getIconSlug(model) {
+
+    const modelId =
+        String(model?.id || "").trim();
+
+    const provider =
+        getProviderFromModelId(modelId);
+
+    if (provider && PROVIDER_ICON_MAP[provider]) {
+        return PROVIDER_ICON_MAP[provider];
+    }
+
+    // Some OpenRouter responses can expose a provider field.
+    const explicitProvider =
+        normalizeProvider(
+            model?.provider?.slug ||
+            model?.provider?.id ||
+            model?.provider?.name ||
+            ""
+        );
+
+    if (
+        explicitProvider &&
+        PROVIDER_ICON_MAP[explicitProvider]
     ) {
-      await new Promise(resolve =>
-        setTimeout(resolve, 500)
-      );
-
-      attempts++;
+        return PROVIDER_ICON_MAP[explicitProvider];
     }
 
-    const result =
-      commandResults[cmdId] || {
-        status: "timeout",
-        output:
-          "Execution timed out on iOS device"
-      };
+    // No guessing from "llama", "gpt", "claude", etc.
+    // This is intentional.
+    return null;
+}
 
-    delete commandResults[cmdId];
+
+// ============================================================
+// ICON URLS
+// ============================================================
+
+function getIconUrls(model) {
+
+    const slug = getIconSlug(model);
+
+    if (!slug) {
+        return [];
+    }
+
+    return [
+        `${LOBE_ICON_CDN}${slug}.svg`,
+        `${LOBE_ICON_MIRROR}${slug}.svg`
+    ];
+}
+
+
+// ============================================================
+// FETCH OPENROUTER MODELS
+// ============================================================
+
+let modelCache = [];
+let modelCacheTime = 0;
+
+const MODEL_CACHE_TIME = 60 * 1000;
+
+
+async function fetchOpenRouterModels() {
+
+    if (
+        modelCache.length &&
+        Date.now() - modelCacheTime < MODEL_CACHE_TIME
+    ) {
+        return modelCache;
+    }
+
+    const response =
+        await fetch(OPENROUTER_MODELS_URL, {
+            method: "GET",
+            headers: {
+                "Accept": "application/json"
+            },
+            cache: "no-store"
+        });
+
+    if (!response.ok) {
+
+        throw new Error(
+            `OpenRouter model request failed: ${response.status}`
+        );
+    }
+
+    const json =
+        await response.json();
+
+    if (!json || !Array.isArray(json.data)) {
+        throw new Error("Invalid OpenRouter model response");
+    }
+
+    modelCache = json.data;
+    modelCacheTime = Date.now();
+
+    return modelCache;
+}
+
+
+// ============================================================
+// MODEL RESPONSE FORMAT
+// ============================================================
+
+function formatModel(model) {
+
+    const iconSlug =
+        getIconSlug(model);
+
+    const iconUrls =
+        getIconUrls(model);
+
+    const modelId =
+        cleanString(model.id, 300);
+
+    const modelName =
+        cleanString(
+            model.name ||
+            model.id,
+            300
+        );
+
+    const provider =
+        getProviderFromModelId(modelId);
 
     return {
-      content: [
-        {
-          type: "text",
-          text:
-            typeof result.output === "string"
-              ? result.output
-              : JSON.stringify(result.output)
-        }
-      ]
+        id: modelId,
+
+        name: modelName,
+
+        provider,
+
+        icon: iconSlug,
+
+        iconUrls,
+
+        contextLength:
+            model.context_length || null,
+
+        pricing:
+            model.pricing || null,
+
+        architecture:
+            model.architecture || null
     };
-  }
-);
+}
+
 
 // ============================================================
-// MCP SSE
+// API: MODELS
 // ============================================================
 
-let transport;
+app.get("/api/models", async (req, res) => {
 
-app.get("/sse", async (req, res) => {
-  try {
-    transport = new SSEServerTransport(
-      "/messages",
-      res
-    );
+    try {
 
-    await mcpServer.connect(transport);
-  } catch (err) {
-    console.error("SSE connection error:", err);
-  }
+        const models =
+            await fetchOpenRouterModels();
+
+        const formatted =
+            models
+                .filter(model => model && model.id)
+                .map(formatModel);
+
+        res.setHeader(
+            "Cache-Control",
+            "no-store"
+        );
+
+        res.json({
+            ok: true,
+            count: formatted.length,
+            models: formatted
+        });
+
+    } catch (error) {
+
+        console.error(
+            "[Models]",
+            error
+        );
+
+        res.status(500).json({
+            ok: false,
+            error: error.message,
+            models: []
+        });
+    }
 });
 
-app.post("/messages", async (req, res) => {
-  try {
-    if (!transport) {
-      return res
-        .status(400)
-        .send("No SSE connection");
-    }
-
-    await transport.handlePostMessage(
-      req,
-      res
-    );
-  } catch (err) {
-    console.error(
-      "MCP message error:",
-      err
-    );
-
-    if (!res.headersSent) {
-      res.status(500).send("MCP message error");
-    }
-  }
-});
 
 // ============================================================
-// DELTA POLLING BRIDGE
+// DELTA POLLING
 // ============================================================
 
-app.post("/delta/poll", (req, res) => {
-  lastPollTime = Date.now();
+app.get("/delta/poll", (req, res) => {
 
-  const {
-    username,
-    gameName,
-    iconUrl
-  } = req.body || {};
+    const incoming = req.query || {};
 
-  if (username) {
     clientInfo = {
-      connected: true,
-      username: String(username),
-      gameName:
-        gameName
-          ? String(gameName)
-          : "Unknown Game",
-      iconUrl:
-        iconUrl
-          ? String(iconUrl)
-          : ""
+        connected: true,
+
+        username:
+            cleanString(
+                incoming.username,
+                100
+            ),
+
+        userId:
+            cleanString(
+                incoming.userId,
+                100
+            ),
+
+        gameName:
+            cleanString(
+                incoming.gameName,
+                200
+            ),
+
+        gameId:
+            cleanString(
+                incoming.gameId,
+                100
+            ),
+
+        placeId:
+            cleanString(
+                incoming.placeId,
+                100
+            ),
+
+        gameIcon:
+            cleanString(
+                incoming.gameIcon,
+                1000
+            ),
+
+        avatar:
+            cleanString(
+                incoming.avatar,
+                1000
+            ),
+
+        lastPollTime: Date.now()
     };
-  }
 
-  const commands = pendingCommands;
+    const commands =
+        pendingCommands.splice(
+            0,
+            pendingCommands.length
+        );
 
-  pendingCommands = [];
+    res.setHeader(
+        "Cache-Control",
+        "no-store"
+    );
 
-  res.json(commands);
+    res.json({
+        ok: true,
+        connected: true,
+        commands
+    });
 });
+
 
 // ============================================================
 // DELTA RESULT
 // ============================================================
 
 app.post("/delta/result", (req, res) => {
-  const {
-    id,
-    status,
-    output
-  } = req.body || {};
 
-  if (!id) {
-    return res
-      .status(400)
-      .json({
-        success: false,
-        error: "Missing command id"
-      });
-  }
+    const body =
+        req.body || {};
 
-  commandResults[id] = {
-    status,
-    output:
-      output !== undefined
-        ? output
-        : "Success (No return value)"
-  };
+    const commandId =
+        cleanString(
+            body.commandId,
+            200
+        );
 
-  res.json({
-    success: true
-  });
+    if (!commandId) {
+
+        return res.status(400).json({
+            ok: false,
+            error: "Missing commandId"
+        });
+    }
+
+    commandResults.set(
+        commandId,
+        {
+            ok: body.ok !== false,
+            result: body.result ?? null,
+            error: body.error ?? null,
+            timestamp: Date.now()
+        }
+    );
+
+    // Keep memory under control.
+    if (commandResults.size > 200) {
+
+        const oldest =
+            commandResults.keys().next().value;
+
+        commandResults.delete(oldest);
+    }
+
+    res.json({
+        ok: true
+    });
 });
+
 
 // ============================================================
 // STATUS CHECK
 // ============================================================
 
 app.get("/status-check", (req, res) => {
-  const liveClient = getLiveClientInfo();
 
-  // IMPORTANT:
-  // Clear stale telemetry immediately after timeout.
-  if (!liveClient.connected) {
     clearDisconnectedClient();
-  }
 
-  res.json(
-    liveClient
-  );
-});
+    const live =
+        getLiveClientInfo();
 
-// ============================================================
-// MODEL ICON SYSTEM
-// ============================================================
-//
-// Uses the current Lobe Icons static SVG CDN rather than the
-// old GitHub raw path.
-//
-// Example:
-//
-// https://unpkg.com/@lobehub/icons-static-svg@latest/icons/openai.svg
-//
-// Lobe Icons publishes provider/model brand icons as static
-// SVG/PNG/WebP assets.
-// ============================================================
-
-const LOBE_ICON_BASE =
-  "https://unpkg.com/@lobehub/icons-static-svg@latest/icons";
-
-const providerIconMap = {
-  openai: "openai",
-  anthropic: "claude",
-  google: "google",
-  gemini: "google",
-
-  "meta-llama": "meta",
-  meta: "meta",
-
-  mistralai: "mistral",
-  mistral: "mistral",
-
-  deepseek: "deepseek",
-
-  qwen: "qwen",
-
-  cohere: "cohere",
-
-  xai: "xai",
-
-  groq: "groq",
-
-  perplexity: "perplexity",
-
-  microsoft: "microsoft",
-
-  nvidia: "nvidia",
-
-  amazon: "aws",
-
-  ai21: "ai21",
-
-  together: "together",
-
-  fireworks: "fireworks",
-
-  moonshotai: "moonshot",
-
-  "moonshot-ai": "moonshot",
-
-  minimax: "minimax",
-
-  "minimaxai": "minimax",
-
-  zhipuai: "zhipu",
-
-  "z-ai": "zai",
-
-  zai: "zai",
-
-  "01-ai": "01ai",
-
-  baichuan: "baichuan",
-
-  "bytedance": "doubao",
-  doubao: "doubao",
-
-  "stepfun": "stepfun",
-
-  "databricks": "databricks",
-
-  ai2: "ai2",
-
-  inflection: "inflection",
-
-  reka: "reka",
-
-  liquid: "liquid",
-
-  nousresearch: "nous",
-
-  nous: "nous",
-
-  openrouter: "openrouter",
-
-  "cloudflare": "cloudflare",
-
-  "sao10k": "sao10k",
-
-  "alpindale": "alpindale",
-
-  "undi95": "undi95",
-
-  "mancer": "mancer",
-
-  "neversleep": "neversleep",
-
-  "thedrummer": "drummer"
-};
-
-// Models whose provider is represented by a model-family
-// rather than the raw OpenRouter provider namespace.
-const modelFamilyIconMap = [
-  {
-    match: /gemini|gemma/i,
-    icon: "google"
-  },
-
-  {
-    match: /gpt-|o1|o3|o4/i,
-    icon: "openai"
-  },
-
-  {
-    match: /claude/i,
-    icon: "claude"
-  },
-
-  {
-    match: /llama/i,
-    icon: "meta"
-  },
-
-  {
-    match: /mistral|mixtral/i,
-    icon: "mistral"
-  },
-
-  {
-    match: /deepseek/i,
-    icon: "deepseek"
-  },
-
-  {
-    match: /qwen/i,
-    icon: "qwen"
-  },
-
-  {
-    match: /command-r|command-a/i,
-    icon: "cohere"
-  },
-
-  {
-    match: /grok/i,
-    icon: "xai"
-  },
-
-  {
-    match: /nemotron/i,
-    icon: "nvidia"
-  },
-
-  {
-    match: /phi-/i,
-    icon: "microsoft"
-  },
-
-  {
-    match: /minimax/i,
-    icon: "minimax"
-  },
-
-  {
-    match: /glm/i,
-    icon: "zhipu"
-  }
-];
-
-function getIconSlug(model) {
-  const id =
-    String(model.id || "").toLowerCase();
-
-  const name =
-    String(model.name || "").toLowerCase();
-
-  const combined =
-    `${id} ${name}`;
-
-  // First use the provider namespace.
-  const parts = id.split("/");
-
-  if (parts.length > 1) {
-    const provider =
-      parts[0]
-        .toLowerCase()
-        .trim();
-
-    if (providerIconMap[provider]) {
-      return providerIconMap[provider];
-    }
-  }
-
-  // Then use model-family detection.
-  for (
-    const family of modelFamilyIconMap
-  ) {
-    if (family.match.test(combined)) {
-      return family.icon;
-    }
-  }
-
-  return null;
-}
-
-function getIconUrl(iconSlug) {
-  if (!iconSlug) {
-    return "";
-  }
-
-  return `${LOBE_ICON_BASE}/${encodeURIComponent(
-    iconSlug
-  )}-color.svg`;
-}
-
-// ============================================================
-// MODEL CATALOG
-// ============================================================
-
-app.get(
-  "/api/models",
-  async (req, res) => {
-    try {
-      const response =
-        await fetch(
-          "https://openrouter.ai/api/v1/models",
-          {
-            headers: apiKey
-              ? {
-                  Authorization:
-                    `Bearer ${apiKey}`
-                }
-              : {}
-          }
-        );
-
-      if (!response.ok) {
-        throw new Error(
-          `OpenRouter returned HTTP ${response.status}`
-        );
-      }
-
-      const data =
-        await response.json();
-
-      if (!Array.isArray(data.data)) {
-        return res.json([]);
-      }
-
-      const models =
-        data.data
-          .map(model => {
-            const promptPrice =
-              parseFloat(
-                model.pricing?.prompt || "0"
-              );
-
-            const completionPrice =
-              parseFloat(
-                model.pricing?.completion || "0"
-              );
-
-            const isFree =
-              promptPrice === 0 &&
-              completionPrice === 0;
-
-            const id =
-              String(
-                model.id || ""
-              );
-
-            const parts =
-              id.split("/");
-
-            const rawProvider =
-              parts.length > 1
-                ? parts[0]
-                : "";
-
-            const iconSlug =
-              getIconSlug(model);
-
-            return {
-              id,
-              name:
-                model.name ||
-                id,
-              brand:
-                rawProvider
-                  ? rawProvider
-                      .replace(/[-_]/g, " ")
-                      .toUpperCase()
-                  : "OTHER",
-              provider:
-                rawProvider,
-              isFree,
-              iconSlug,
-              iconUrl:
-                getIconUrl(iconSlug)
-            };
-          })
-          .filter(model => model.id);
-
-      // Put models with known real provider icons first.
-      models.sort(
-        (a, b) => {
-          if (
-            Boolean(a.iconUrl) !==
-            Boolean(b.iconUrl)
-          ) {
-            return a.iconUrl
-              ? -1
-              : 1;
-          }
-
-          return a.name.localeCompare(
-            b.name
-          );
-        }
-      );
-
-      res.json(models);
-    } catch (err) {
-      console.error(
-        "Model fetch error:",
-        err
-      );
-
-      res.status(500).json({
-        error:
-          "Failed to load model catalog"
-      });
-    }
-  }
-);
-
-// ============================================================
-// DASHBOARD
-// ============================================================
-
-app.get("/", (req, res) => {
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
-  >
-
-  <title>Delta AI Controller | MCP Command Hub</title>
-
-  <style>
-    :root {
-      --bg: #050507;
-      --sidebar-bg: #0b0b0f;
-      --panel: #111116;
-      --panel-hover: #181820;
-
-      --border:
-        rgba(255, 255, 255, 0.08);
-
-      --accent: #6366f1;
-      --accent-hover: #4f46e5;
-
-      --text: #f4f4f5;
-      --text-muted: #9494a0;
-
-      --success: #10b981;
-      --warning: #f59e0b;
-
-      --free-bg:
-        rgba(16, 185, 129, 0.12);
-
-      --free-text: #34d399;
-
-      --paid-bg:
-        rgba(59, 130, 246, 0.12);
-
-      --paid-text: #60a5fa;
-    }
-
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-
-      font-family:
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
-        Roboto,
-        sans-serif;
-    }
-
-    body {
-      background:
-        var(--bg);
-
-      color:
-        var(--text);
-
-      height: 100vh;
-      width: 100vw;
-
-      display: flex;
-
-      overflow: hidden;
-    }
-
-    .app-layout {
-      display: flex;
-
-      width: 100%;
-      height: 100%;
-    }
-
-    sidebar {
-      width: 440px;
-
-      background:
-        var(--sidebar-bg);
-
-      border-right:
-        1px solid var(--border);
-
-      display: flex;
-      flex-direction: column;
-
-      padding: 24px;
-
-      gap: 20px;
-
-      z-index: 10;
-
-      flex-shrink: 0;
-
-      overflow-y: auto;
-    }
-
-    header {
-      display: flex;
-
-      justify-content:
-        space-between;
-
-      align-items: center;
-
-      border-bottom:
-        1px solid var(--border);
-
-      padding-bottom: 16px;
-    }
-
-    .logo-area h1 {
-      font-size: 18px;
-
-      font-weight: 700;
-
-      letter-spacing: -0.5px;
-
-      display: flex;
-
-      align-items: center;
-
-      gap: 8px;
-    }
-
-    .logo-area span {
-      font-size: 11px;
-
-      background:
-        rgba(99,102,241,0.15);
-
-      color:
-        #818cf8;
-
-      padding:
-        2px 6px;
-
-      border-radius: 6px;
-
-      font-weight: 500;
-    }
-
-    .status-badge {
-      display: flex;
-
-      align-items: center;
-
-      gap: 6px;
-
-      font-size: 12px;
-
-      font-weight: 600;
-
-      padding:
-        5px 12px;
-
-      border-radius: 20px;
-
-      background:
-        rgba(255,255,255,0.03);
-
-      border:
-        1px solid var(--border);
-    }
-
-    .dot {
-      width: 7px;
-      height: 7px;
-
-      border-radius: 50%;
-
-      background:
-        var(--warning);
-    }
-
-    .dot.connected {
-      background:
-        var(--success);
-
-      box-shadow:
-        0 0 8px var(--success);
-    }
-
-    .telemetry-card {
-      background:
-        rgba(0,0,0,0.35);
-
-      border:
-        1px solid var(--border);
-
-      border-radius: 12px;
-
-      padding: 14px;
-
-      display: flex;
-
-      align-items: center;
-
-      gap: 14px;
-
-      min-height: 78px;
-
-      transition:
-        opacity 0.2s,
-        background 0.2s;
-    }
-
-    .telemetry-card.disconnected {
-      opacity: 0.65;
-    }
-
-    .game-icon {
-      width: 50px;
-      height: 50px;
-
-      border-radius: 10px;
-
-      background:
-        #1a1a22;
-
-      object-fit: cover;
-
-      border:
-        1px solid var(--border);
-
-      flex-shrink: 0;
-    }
-
-    .telemetry-info {
-      flex: 1;
-
-      display: flex;
-
-      flex-direction: column;
-
-      gap: 4px;
-
-      overflow: hidden;
-    }
-
-    .game-title {
-      font-size: 15px;
-
-      font-weight: 600;
-
-      color:
-        var(--text);
-
-      white-space: nowrap;
-
-      overflow: hidden;
-
-      text-overflow: ellipsis;
-    }
-
-    .player-name {
-      font-size: 12px;
-
-      color:
-        var(--text-muted);
-    }
-
-    .control-group {
-      display: flex;
-
-      flex-direction: column;
-
-      gap: 8px;
-    }
-
-    label {
-      font-size: 11px;
-
-      font-weight: 700;
-
-      color:
-        var(--text-muted);
-
-      text-transform:
-        uppercase;
-
-      letter-spacing:
-        0.8px;
-    }
-
-    .custom-dropdown {
-      position: relative;
-
-      width: 100%;
-
-      user-select: none;
-    }
-
-    .dropdown-select-btn {
-      width: 100%;
-
-      background:
-        rgba(0,0,0,0.5);
-
-      border:
-        1px solid var(--border);
-
-      border-radius: 12px;
-
-      padding:
-        12px 14px;
-
-      color:
-        var(--text);
-
-      display: flex;
-
-      align-items: center;
-
-      justify-content:
-        space-between;
-
-      cursor: pointer;
-
-      font-size: 13px;
-
-      transition:
-        border-color 0.2s;
-    }
-
-    .dropdown-select-btn:hover {
-      border-color:
-        rgba(255,255,255,0.2);
-    }
-
-    .selected-value {
-      display: flex;
-
-      align-items: center;
-
-      gap: 10px;
-
-      overflow: hidden;
-
-      white-space: nowrap;
-
-      text-overflow: ellipsis;
-    }
-
-    .selected-value img {
-      width: 18px;
-      height: 18px;
-
-      object-fit: contain;
-
-      flex-shrink: 0;
-    }
-
-    .dropdown-panel {
-      position: absolute;
-
-      bottom:
-        calc(100% + 6px);
-
-      left: 0;
-
-      width: 100%;
-
-      background:
-        #15151b;
-
-      border:
-        1px solid var(--border);
-
-      border-radius: 12px;
-
-      box-shadow:
-        0 -20px 40px rgba(0,0,0,0.8);
-
-      z-index: 100;
-
-      display: none;
-
-      flex-direction: column;
-
-      max-height: 360px;
-
-      overflow: hidden;
-    }
-
-    .dropdown-panel.open {
-      display: flex;
-    }
-
-    .dropdown-search-box {
-      padding: 10px;
-
-      border-bottom:
-        1px solid var(--border);
-
-      background:
-        #0f0f13;
-
-      flex-shrink: 0;
-    }
-
-    .dropdown-search-box input {
-      width: 100%;
-
-      background:
-        rgba(0,0,0,0.4);
-
-      border:
-        1px solid var(--border);
-
-      border-radius: 8px;
-
-      padding:
-        8px 10px;
-
-      color:
-        var(--text);
-
-      font-size: 12px;
-
-      outline: none;
-    }
-
-    .dropdown-search-box input:focus {
-      border-color:
-        var(--accent);
-    }
-
-    .dropdown-options-list {
-      overflow-y: auto;
-
-      max-height: 300px;
-
-      padding: 4px;
-    }
-
-    .brand-group-title {
-      font-size: 10px;
-
-      font-weight: 700;
-
-      color:
-        var(--text-muted);
-
-      padding:
-        8px 8px 4px 8px;
-
-      text-transform:
-        uppercase;
-
-      letter-spacing:
-        0.5px;
-    }
-
-    .dropdown-option {
-      display: flex;
-
-      align-items: center;
-
-      justify-content:
-        space-between;
-
-      padding:
-        8px 10px;
-
-      border-radius: 6px;
-
-      cursor: pointer;
-
-      transition:
-        background 0.15s;
-    }
-
-    .dropdown-option:hover {
-      background:
-        var(--panel-hover);
-    }
-
-    .opt-left {
-      display: flex;
-
-      align-items: center;
-
-      gap: 8px;
-
-      overflow: hidden;
-
-      min-width: 0;
-    }
-
-    .opt-left img {
-      width: 18px;
-      height: 18px;
-
-      object-fit: contain;
-
-      flex-shrink: 0;
-
-      display: block;
-    }
-
-    .opt-name {
-      font-size: 12px;
-
-      color:
-        var(--text);
-
-      white-space: nowrap;
-
-      overflow: hidden;
-
-      text-overflow: ellipsis;
-    }
-
-    .badge {
-      font-size: 9px;
-
-      font-weight: 700;
-
-      padding:
-        2px 6px;
-
-      border-radius: 4px;
-
-      text-transform:
-        uppercase;
-
-      letter-spacing:
-        0.5px;
-
-      flex-shrink: 0;
-    }
-
-    .badge.free {
-      background:
-        var(--free-bg);
-
-      color:
-        var(--free-text);
-    }
-
-    .badge.paid {
-      background:
-        var(--paid-bg);
-
-      color:
-        var(--paid-text);
-    }
-
-    textarea {
-      width: 100%;
-
-      height: 140px;
-
-      background:
-        rgba(0,0,0,0.5);
-
-      color:
-        var(--text);
-
-      border:
-        1px solid var(--border);
-
-      padding: 14px;
-
-      border-radius: 12px;
-
-      font-size: 13px;
-
-      resize: none;
-
-      outline: none;
-
-      transition:
-        border-color 0.2s;
-
-      line-height: 1.5;
-    }
-
-    textarea:focus {
-      border-color:
-        var(--accent);
-    }
-
-    button.execute-btn {
-      background:
-        var(--accent);
-
-      color:
-        #fff;
-
-      border: none;
-
-      padding: 13px;
-
-      font-weight: 600;
-
-      border-radius: 12px;
-
-      cursor: pointer;
-
-      transition:
-        background 0.2s,
-        transform 0.1s;
-
-      font-size: 13px;
-
-      width: 100%;
-
-      margin-top: 4px;
-    }
-
-    button.execute-btn:hover {
-      background:
-        var(--accent-hover);
-    }
-
-    button.execute-btn:active {
-      transform:
-        scale(0.99);
-    }
-
-    button.execute-btn:disabled {
-      opacity: 0.55;
-
-      cursor: not-allowed;
-    }
-
-    main {
-      flex: 1;
-
-      background:
-        var(--bg);
-
-      display: flex;
-
-      flex-direction: column;
-
-      padding: 24px;
-
-      gap: 16px;
-
-      height: 100%;
-
-      overflow: hidden;
-    }
-
-    .console-header {
-      display: flex;
-
-      justify-content:
-        space-between;
-
-      align-items: center;
-    }
-
-    .console-container {
-      flex: 1;
-
-      background:
-        var(--panel);
-
-      border:
-        1px solid var(--border);
-
-      border-radius: 16px;
-
-      padding: 20px;
-
-      display: flex;
-
-      flex-direction: column;
-
-      overflow: hidden;
-
-      box-shadow:
-        inset 0 2px 10px rgba(0,0,0,0.5);
-    }
-
-    pre {
-      color:
-        #34d399;
-
-      font-family:
-        ui-monospace,
-        SFMono-Regular,
-        Menlo,
-        monospace;
-
-      font-size: 13px;
-
-      line-height: 1.6;
-
-      overflow-y: auto;
-
-      flex: 1;
-
-      white-space: pre-wrap;
-
-      word-break: break-word;
-    }
-
-    .no-icon {
-      width: 18px;
-      height: 18px;
-
-      border-radius: 5px;
-
-      background:
-        #24242d;
-
-      border:
-        1px solid
-        rgba(255,255,255,0.08);
-
-      flex-shrink: 0;
-    }
-
-    @media (max-width: 850px) {
-      sidebar {
-        width: 360px;
-      }
-    }
-  </style>
-</head>
-
-<body>
-
-  <div class="app-layout">
-
-    <sidebar>
-
-      <header>
-
-        <div class="logo-area">
-
-          <h1>
-            Delta AI Hub
-            <span>MCP v3.6</span>
-          </h1>
-
-        </div>
-
-        <div class="status-badge">
-
-          <div
-            id="dot"
-            class="dot"
-          ></div>
-
-          <span id="status-text">
-            Connecting...
-          </span>
-
-        </div>
-
-      </header>
-
-      <div
-        class="telemetry-card disconnected"
-        id="telemetry-card"
-      >
-
-        <img
-          id="game-icon"
-          class="game-icon"
-          alt="Game Icon"
-          style="display:none"
-        >
-
-        <div
-          id="game-icon-placeholder"
-          class="game-icon"
-        ></div>
-
-        <div class="telemetry-info">
-
-          <span
-            id="game-name"
-            class="game-title"
-          >
-            Waiting for session...
-          </span>
-
-          <span
-            id="player-name"
-            class="player-name"
-          >
-            No Delta client connected
-          </span>
-
-        </div>
-
-      </div>
-
-      <div class="control-group">
-
-        <label for="prompt">
-          AI Task Prompt
-        </label>
-
-        <textarea
-          id="prompt"
-          placeholder="Ask AI to perform a task..."
-        ></textarea>
-
-      </div>
-
-      <div class="control-group">
-
-        <label>
-          Select AI Model
-        </label>
-
-        <div
-          class="custom-dropdown"
-          id="model-dropdown"
-        >
-
-          <div
-            class="dropdown-select-btn"
-            onclick="toggleDropdown()"
-          >
-
-            <div
-              class="selected-value"
-              id="selected-display"
-            >
-              <span>
-                Loading model catalog...
-              </span>
-            </div>
-
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.5"
-            >
-              <path
-                d="M6 15l6-6 6 6"
-              />
-            </svg>
-
-          </div>
-
-          <div
-            class="dropdown-panel"
-            id="dropdown-panel"
-          >
-
-            <div
-              class="dropdown-search-box"
-            >
-
-              <input
-                type="text"
-                id="model-search"
-                placeholder="Search models or brands..."
-                oninput="filterModels(this.value)"
-              >
-
-            </div>
-
-            <div
-              class="dropdown-options-list"
-              id="options-list"
-            ></div>
-
-          </div>
-
-        </div>
-
-      </div>
-
-      <button
-        class="execute-btn"
-        id="exec-btn"
-        onclick="sendAICommand()"
-      >
-        Execute Task
-      </button>
-
-    </sidebar>
-
-    <main>
-
-      <div class="console-header">
-
-        <label>
-          Execution Output & Live Telemetry Logs
-        </label>
-
-      </div>
-
-      <div class="console-container">
-
-        <pre id="output">System initialized. Awaiting commands...</pre>
-
-      </div>
-
-    </main>
-
-  </div>
-
-  <script>
-
-    let allModelsData = [];
-
-    let selectedModelId =
-      "google/gemini-2.5-flash";
-
-    // ========================================================
-    // ICON HELPERS
-    // ========================================================
-
-    function createIcon(url, alt = "") {
-      if (!url) {
-        const placeholder =
-          document.createElement("div");
-
-        placeholder.className =
-          "no-icon";
-
-        return placeholder;
-      }
-
-      const img =
-        document.createElement("img");
-
-      img.src = url;
-      img.alt = alt;
-
-      img.loading = "eager";
-      img.decoding = "async";
-
-      img.width = 18;
-      img.height = 18;
-
-      img.style.objectFit =
-        "contain";
-
-      // Do NOT replace a failed icon
-      // with another AI's logo.
-      //
-      // That was one of the problems
-      // with the previous implementation.
-      img.onerror = () => {
-        img.replaceWith(
-          createIcon("")
-        );
-      };
-
-      return img;
-    }
-
-    // ========================================================
-    // MODEL CATALOG
-    // ========================================================
-
-    async function fetchModelsCatalog() {
-
-      try {
-
-        const res =
-          await fetch(
-            "/api/models",
-            {
-              cache: "no-store"
-            }
-          );
-
-        if (!res.ok) {
-          throw new Error(
-            "HTTP " + res.status
-          );
-        }
-
-        allModelsData =
-          await res.json();
-
-        renderDropdownOptions(
-          allModelsData
-        );
-
-        const defaultModel =
-          allModelsData.find(
-            m =>
-              m.id ===
-              selectedModelId
-          ) ||
-          allModelsData[0];
-
-        if (defaultModel) {
-          setSelectedModel(
-            defaultModel
-          );
-        }
-
-      } catch (e) {
-
-        const selected =
-          document.getElementById(
-            "selected-display"
-          );
-
-        selected.innerHTML = "";
-
-        const text =
-          document.createElement(
-            "span"
-          );
-
-        text.textContent =
-          "Failed to load models";
-
-        selected.appendChild(text);
-
-        console.error(
-          "Model catalog error:",
-          e
-        );
-      }
-    }
-
-    function renderDropdownOptions(
-      models
-    ) {
-
-      const listEl =
-        document.getElementById(
-          "options-list"
-        );
-
-      listEl.innerHTML = "";
-
-      if (!models.length) {
-
-        const empty =
-          document.createElement(
-            "div"
-          );
-
-        empty.style.padding =
-          "14px";
-
-        empty.style.color =
-          "var(--text-muted)";
-
-        empty.style.fontSize =
-          "12px";
-
-        empty.textContent =
-          "No models found.";
-
-        listEl.appendChild(empty);
-
-        return;
-      }
-
-      const grouped = {};
-
-      models.forEach(model => {
-
-        const brand =
-          model.brand ||
-          "OTHER";
-
-        if (!grouped[brand]) {
-          grouped[brand] = [];
-        }
-
-        grouped[brand].push(
-          model
-        );
-      });
-
-      const brands =
-        Object.keys(grouped)
-          .sort((a, b) =>
-            a.localeCompare(b)
-          );
-
-      for (const brand of brands) {
-
-        const groupTitle =
-          document.createElement(
-            "div"
-          );
-
-        groupTitle.className =
-          "brand-group-title";
-
-        groupTitle.textContent =
-          brand;
-
-        listEl.appendChild(
-          groupTitle
-        );
-
-        grouped[brand].forEach(
-          model => {
-
-            const opt =
-              document.createElement(
-                "div"
-              );
-
-            opt.className =
-              "dropdown-option";
-
-            opt.onclick = () => {
-
-              setSelectedModel(
-                model
-              );
-
-              toggleDropdown();
-            };
-
-            const left =
-              document.createElement(
-                "div"
-              );
-
-            left.className =
-              "opt-left";
-
-            const icon =
-              createIcon(
-                model.iconUrl,
-                model.name
-              );
-
-            left.appendChild(
-              icon
-            );
-
-            const name =
-              document.createElement(
-                "span"
-              );
-
-            name.className =
-              "opt-name";
-
-            name.title =
-              model.id;
-
-            name.textContent =
-              model.name;
-
-            left.appendChild(
-              name
-            );
-
-            const badge =
-              document.createElement(
-                "span"
-              );
-
-            badge.className =
-              "badge " +
-              (
-                model.isFree
-                  ? "free"
-                  : "paid"
-              );
-
-            badge.textContent =
-              model.isFree
-                ? "Free"
-                : "Paid";
-
-            opt.appendChild(
-              left
-            );
-
-            opt.appendChild(
-              badge
-            );
-
-            listEl.appendChild(
-              opt
-            );
-          }
-        );
-      }
-    }
-
-    function setSelectedModel(
-      model
-    ) {
-
-      selectedModelId =
-        model.id;
-
-      const display =
-        document.getElementById(
-          "selected-display"
-        );
-
-      display.innerHTML = "";
-
-      const icon =
-        createIcon(
-          model.iconUrl,
-          model.name
-        );
-
-      display.appendChild(
-        icon
-      );
-
-      const text =
-        document.createElement(
-          "span"
-        );
-
-      text.textContent =
-        model.name;
-
-      display.appendChild(
-        text
-      );
-    }
-
-    function toggleDropdown() {
-
-      const panel =
-        document.getElementById(
-          "dropdown-panel"
-        );
-
-      panel.classList.toggle(
-        "open"
-      );
-
-      if (
-        panel.classList.contains(
-          "open"
-        )
-      ) {
-
-        const search =
-          document.getElementById(
-            "model-search"
-          );
-
-        search.focus();
-
-        search.select();
-      }
-    }
-
-    function filterModels(
-      query
-    ) {
-
-      const q =
-        query
-          .trim()
-          .toLowerCase();
-
-      if (!q) {
-
-        renderDropdownOptions(
-          allModelsData
-        );
-
-        return;
-      }
-
-      const filtered =
-        allModelsData.filter(
-          model => {
-
-            return (
-              model.id
-                .toLowerCase()
-                .includes(q) ||
-
-              model.name
-                .toLowerCase()
-                .includes(q) ||
-
-              model.brand
-                .toLowerCase()
-                .includes(q) ||
-
-              (
-                model.provider ||
-                ""
-              )
-                .toLowerCase()
-                .includes(q)
-            );
-          }
-        );
-
-      renderDropdownOptions(
-        filtered
-      );
-    }
-
-    window.onclick =
-      function(event) {
-
-        if (
-          !event.target.closest(
-            "#model-dropdown"
-          )
-        ) {
-
-          document
-            .getElementById(
-              "dropdown-panel"
-            )
-            .classList.remove(
-              "open"
-            );
-        }
-      };
-
-    // ========================================================
-    // LIVE TELEMETRY
-    // ========================================================
-
-    function setDisconnectedUI() {
-
-      const card =
-        document.getElementById(
-          "telemetry-card"
-        );
-
-      const icon =
-        document.getElementById(
-          "game-icon"
-        );
-
-      const placeholder =
-        document.getElementById(
-          "game-icon-placeholder"
-        );
-
-      const gameName =
-        document.getElementById(
-          "game-name"
-        );
-
-      const playerName =
-        document.getElementById(
-          "player-name"
-        );
-
-      const dot =
-        document.getElementById(
-          "dot"
-        );
-
-      const status =
-        document.getElementById(
-          "status-text"
-        );
-
-      card.classList.add(
-        "disconnected"
-      );
-
-      dot.classList.remove(
-        "connected"
-      );
-
-      status.textContent =
-        "Waiting for Delta...";
-
-      // CRITICAL:
-      // Actually clear the old game info.
-      gameName.textContent =
-        "Waiting for session...";
-
-      playerName.textContent =
-        "No Delta client connected";
-
-      icon.removeAttribute(
-        "src"
-      );
-
-      icon.style.display =
-        "none";
-
-      placeholder.style.display =
-        "block";
-    }
-
-    function setConnectedUI(
-      data
-    ) {
-
-      const card =
-        document.getElementById(
-          "telemetry-card"
-        );
-
-      const icon =
-        document.getElementById(
-          "game-icon"
-        );
-
-      const placeholder =
-        document.getElementById(
-          "game-icon-placeholder"
-        );
-
-      const gameName =
-        document.getElementById(
-          "game-name"
-        );
-
-      const playerName =
-        document.getElementById(
-          "player-name"
-        );
-
-      const dot =
-        document.getElementById(
-          "dot"
-        );
-
-      const status =
-        document.getElementById(
-          "status-text"
-        );
-
-      card.classList.remove(
-        "disconnected"
-      );
-
-      dot.classList.add(
-        "connected"
-      );
-
-      status.textContent =
-        "Delta Connected";
-
-      gameName.textContent =
-        data.gameName ||
-        "Unknown Game";
-
-      playerName.textContent =
-        "Player: " +
-        (
-          data.username ||
-          "Unknown"
-        );
-
-      if (data.iconUrl) {
-
-        icon.src =
-          data.iconUrl;
-
-        icon.style.display =
-          "block";
-
-        placeholder.style.display =
-          "none";
-
-      } else {
-
-        icon.removeAttribute(
-          "src"
-        );
-
-        icon.style.display =
-          "none";
-
-        placeholder.style.display =
-          "block";
-      }
-    }
-
-    async function updateStatus() {
-
-      try {
-
-        const res =
-          await fetch(
-            "/status-check",
-            {
-              cache: "no-store"
-            }
-          );
-
-        if (!res.ok) {
-          throw new Error(
-            "HTTP " + res.status
-          );
-        }
-
-        const data =
-          await res.json();
-
-        if (
-          data.connected === true
-        ) {
-
-          setConnectedUI(
-            data
-          );
-
-        } else {
-
-          setDisconnectedUI();
-        }
-
-      } catch (e) {
-
-        // Treat a failed heartbeat
-        // as disconnected so stale
-        // game information never remains.
-        setDisconnectedUI();
-      }
-    }
-
-    // ========================================================
-    // AI COMMAND
-    // ========================================================
-
-    async function sendAICommand() {
-
-      const promptText =
-        document.getElementById(
-          "prompt"
-        ).value;
-
-      const outputEl =
-        document.getElementById(
-          "output"
-        );
-
-      const btn =
-        document.getElementById(
-          "exec-btn"
-        );
-
-      if (!promptText.trim()) {
-        return;
-      }
-
-      btn.disabled = true;
-
-      outputEl.innerText =
-        "[STAGE 1/3] Connecting to OpenRouter and packaging live player telemetry context...";
-
-      try {
-
-        const res =
-          await fetch(
-            "/ai-chat",
-            {
-              method: "POST",
-
-              headers: {
-                "Content-Type":
-                  "application/json"
-              },
-
-              body:
-                JSON.stringify({
-                  prompt:
-                    promptText,
-
-                  model:
-                    selectedModelId
-                })
-            }
-          );
-
-        const data =
-          await res.json();
-
-        if (!res.ok) {
-
-          throw new Error(
-            data.output ||
-            data.aiResponse ||
-            "Request failed"
-          );
-        }
-
-        outputEl.innerText =
-          "[STAGE 2/3] AI generated the response. Dispatching command through the Delta polling bridge...";
-
-        outputEl.innerText =
-          "[STAGE 3/3] Execution Complete.\\n\\n" +
-          "--- AI RESPONSE ---\\n" +
-          (
-            data.aiResponse ||
-            "No response text"
-          ) +
-          "\\n\\n" +
-          "--- DEVICE EXECUTION RESULT ---\\n" +
-          (
-            data.output ||
-            "No execution output"
-          );
-
-      } catch (err) {
-
-        outputEl.innerText =
-          "Network / Processing Error: " +
-          err.message;
-
-      } finally {
-
-        btn.disabled = false;
-      }
-    }
-
-    // ========================================================
-    // INITIALIZATION
-    // ========================================================
-
-    fetchModelsCatalog();
-
-    updateStatus();
-
-    // 2 second heartbeat.
-    // The server itself uses an 8 second timeout,
-    // so losing Delta causes the UI to clear shortly
-    // after the final poll.
-    setInterval(
-      updateStatus,
-      2000
+    res.setHeader(
+        "Cache-Control",
+        "no-store"
     );
 
-  </script>
-
-</body>
-</html>`);
+    res.json(live);
 });
+
+
+// ============================================================
+// QUEUE COMMAND
+// ============================================================
+
+function queueDeltaCommand(code) {
+
+    const id =
+        `cmd_${Date.now()}_${++commandCounter}`;
+
+    const command = {
+        id,
+        type: "execute",
+        code: String(code || ""),
+        createdAt: Date.now()
+    };
+
+    pendingCommands.push(command);
+
+    return id;
+}
+
+
+// ============================================================
+// WAIT FOR COMMAND RESULT
+// ============================================================
+
+function waitForCommandResult(
+    commandId,
+    timeout = 30000
+) {
+
+    return new Promise(resolve => {
+
+        const started =
+            Date.now();
+
+        const timer =
+            setInterval(() => {
+
+                const result =
+                    commandResults.get(commandId);
+
+                if (result) {
+
+                    clearInterval(timer);
+
+                    commandResults.delete(
+                        commandId
+                    );
+
+                    resolve(result);
+
+                    return;
+                }
+
+                if (
+                    Date.now() - started >=
+                    timeout
+                ) {
+
+                    clearInterval(timer);
+
+                    resolve({
+                        ok: false,
+                        error: "Timed out waiting for Delta client"
+                    });
+                }
+
+            }, 150);
+    });
+}
+
+
+// ============================================================
+// EXTRACT LUAU
+// ============================================================
+
+function extractLuau(text) {
+
+    if (!text) {
+        return null;
+    }
+
+    const fenced =
+        text.match(
+            /```(?:lua|luau)?\s*([\s\S]*?)```/i
+        );
+
+    if (fenced) {
+        return fenced[1].trim();
+    }
+
+    // Only consider it executable if it looks like Luau.
+    const looksLikeLuau =
+        /\b(local|function|game|workspace|Instance|task|Vector3|UDim2|Color3)\b/
+            .test(text);
+
+    if (!looksLikeLuau) {
+        return null;
+    }
+
+    return text.trim();
+}
+
+
+// ============================================================
+// OPENROUTER CHAT
+// ============================================================
+
+async function askOpenRouter({
+    apiKey,
+    model,
+    prompt,
+    system
+}) {
+
+    if (!apiKey) {
+        throw new Error("Missing OpenRouter API key");
+    }
+
+    if (!model) {
+        throw new Error("Missing model");
+    }
+
+    const response =
+        await fetch(
+            OPENROUTER_CHAT_URL,
+            {
+                method: "POST",
+
+                headers: {
+                    "Content-Type":
+                        "application/json",
+
+                    "Authorization":
+                        `Bearer ${apiKey}`,
+
+                    "HTTP-Referer":
+                        "http://localhost",
+
+                    "X-Title":
+                        "Delta AI Hub"
+                },
+
+                body: JSON.stringify({
+                    model,
+
+                    messages: [
+                        {
+                            role: "system",
+                            content:
+                                system ||
+                                "You are a helpful AI assistant."
+                        },
+
+                        {
+                            role: "user",
+                            content: prompt
+                        }
+                    ],
+
+                    temperature: 0.2
+                })
+            }
+        );
+
+    const text =
+        await response.text();
+
+    let data;
+
+    try {
+        data =
+            JSON.parse(text);
+    } catch {
+        data = {
+            raw: text
+        };
+    }
+
+    if (!response.ok) {
+
+        const message =
+            data?.error?.message ||
+            data?.error ||
+            text ||
+            `HTTP ${response.status}`;
+
+        throw new Error(
+            String(message)
+        );
+    }
+
+    return data;
+}
+
 
 // ============================================================
 // AI CHAT
 // ============================================================
 
-app.post(
-  "/ai-chat",
-  async (req, res) => {
+app.post("/ai-chat", async (req, res) => {
 
     const {
-      prompt,
-      model
+        apiKey,
+        model,
+        prompt
     } = req.body || {};
 
-    if (
-      typeof prompt !== "string" ||
-      !prompt.trim()
-    ) {
-      return res.status(400).json({
-        aiResponse: "Invalid request.",
-        output:
-          "A non-empty prompt is required."
-      });
+    if (!apiKey) {
+
+        return res.status(400).json({
+            ok: false,
+            error: "Missing API key"
+        });
     }
 
-    const selectedModel =
-      model ||
-      "google/gemini-2.5-flash";
+    if (!model) {
+
+        return res.status(400).json({
+            ok: false,
+            error: "Missing model"
+        });
+    }
+
+    if (!prompt) {
+
+        return res.status(400).json({
+            ok: false,
+            error: "Missing prompt"
+        });
+    }
+
+
+    // CRITICAL:
+    // Always get fresh telemetry.
+    // Never give the AI stale game information.
+    const live =
+        getLiveClientInfo();
+
+
+    const telemetry =
+        live.connected
+            ? [
+                `Delta client connected: yes`,
+                `Username: ${live.username || "Unknown"}`,
+                `User ID: ${live.userId || "Unknown"}`,
+                `Game: ${live.gameName || "Unknown"}`,
+                `Game ID: ${live.gameId || "Unknown"}`,
+                `Place ID: ${live.placeId || "Unknown"}`
+            ].join("\n")
+            : [
+                "Delta client connected: no",
+                "No live game information is available."
+            ].join("\n");
+
+
+    const systemPrompt = `
+You are Delta AI Hub.
+
+You are assisting the user through a Roblox development dashboard.
+
+LIVE CLIENT INFORMATION:
+${telemetry}
+
+IMPORTANT:
+Only use the game/player information above.
+If the Delta client is disconnected, do not assume or reuse
+previous game/player information.
+
+When the user asks for Luau code, provide complete code.
+`.trim();
+
 
     try {
 
-      // ALWAYS obtain fresh state here.
-      // Never trust the old clientInfo.connected flag.
-      const liveClient =
-        getLiveClientInfo();
+        const data =
+            await askOpenRouter({
+                apiKey,
+                model,
+                prompt,
+                system: systemPrompt
+            });
 
-      const contextPrompt = `
-You are an expert Roblox Luau automation assistant controlling Delta on iOS.
 
-CURRENT LIVE TELEMETRY CONTEXT:
+        const answer =
+            data?.choices?.[0]?.message?.content ||
+            data?.choices?.[0]?.text ||
+            "";
 
-Connection Status:
-${liveClient.connected ? "Active" : "Disconnected"}
 
-Connected Player Username:
-${
-  liveClient.connected
-    ? liveClient.username
-    : "No connected player"
-}
+        const code =
+            extractLuau(answer);
 
-Current Game:
-${
-  liveClient.connected
-    ? liveClient.gameName
-    : "No game session"
-}
 
-IMPORTANT:
-If the Delta client is disconnected, do not claim that a player is currently connected or that they are currently inside a game.
+        let command = null;
+        let execution = null;
 
-The user wants you to perform this task:
 
-"${prompt}"
+        if (
+            code &&
+            live.connected
+        ) {
 
-Format executable Luau strictly inside a standard markdown code block using triple backticks with "luau" or "lua".
+            command =
+                queueDeltaCommand(code);
 
-If no script is needed, output a normal text response.
-`;
-
-      const completion =
-        await openrouter.chat.completions.create(
-          {
-            model:
-              selectedModel,
-
-            messages: [
-              {
-                role: "system",
-                content:
-                  contextPrompt
-              },
-
-              {
-                role: "user",
-                content:
-                  prompt
-              }
-            ]
-          }
-        );
-
-      const aiText =
-        completion
-          .choices?.[0]
-          ?.message?.content ||
-        "No response received from model.";
-
-      const match =
-        aiText.match(
-          /```(?:luau|lua)?([\\s\\S]*?)```/i
-        );
-
-      const codeToRun =
-        match
-          ? match[1].trim()
-          : `print([==[${aiText}]==])`;
-
-      const cmdId =
-        "cmd_" +
-        Date.now();
-
-      pendingCommands.push({
-        id: cmdId,
-        action: "execute_luau",
-        payload: {
-          code: codeToRun
+            execution =
+                await waitForCommandResult(
+                    command,
+                    30000
+                );
         }
-      });
 
-      let attempts = 0;
 
-      while (
-        !commandResults[cmdId] &&
-        attempts < 35
-      ) {
+        res.json({
+            ok: true,
 
-        await new Promise(
-          resolve =>
-            setTimeout(
-              resolve,
-              500
-            )
+            response: answer,
+
+            code,
+
+            commandId:
+                command?.id || null,
+
+            execution,
+
+            client: getLiveClientInfo()
+        });
+
+    } catch (error) {
+
+        console.error(
+            "[AI]",
+            error
         );
 
-        attempts++;
-      }
-
-      const result =
-        commandResults[cmdId] || {
-          status: "timeout",
-
-          output:
-            "Execution timed out. Delta did not poll back a result in time."
-        };
-
-      delete commandResults[
-        cmdId
-      ];
-
-      res.json({
-        aiResponse:
-          aiText,
-
-        output:
-          result.output,
-
-        status:
-          result.status
-      });
-
-    } catch (err) {
-
-      console.error(
-        "OpenRouter Route Error:",
-        err
-      );
-
-      res.status(500).json({
-        aiResponse:
-          "OpenRouter request failed.",
-
-        output:
-          "OpenRouter API Error: " +
-          (
-            err?.message ||
-            "Unknown error"
-          )
-      });
+        res.status(500).json({
+            ok: false,
+            error: error.message
+        });
     }
-  }
+});
+
+
+// ============================================================
+// MCP SERVER
+// ============================================================
+
+const mcpServer =
+    new Server(
+        {
+            name: "delta-ai-hub",
+            version: "1.0.0"
+        },
+        {
+            capabilities: {
+                tools: {}
+            }
+        }
+    );
+
+
+mcpServer.setRequestHandler(
+    ListToolsRequestSchema,
+    async () => {
+
+        return {
+            tools: [
+                {
+                    name: "delta_status",
+
+                    description:
+                        "Returns the current live Delta client status.",
+
+                    inputSchema: {
+                        type: "object",
+                        properties: {}
+                    }
+                },
+
+                {
+                    name: "queue_luau",
+
+                    description:
+                        "Queues Luau for the connected Delta client.",
+
+                    inputSchema: {
+                        type: "object",
+
+                        properties: {
+                            code: {
+                                type: "string"
+                            }
+                        },
+
+                        required: [
+                            "code"
+                        ]
+                    }
+                }
+            ]
+        };
+    }
 );
 
+
+mcpServer.setRequestHandler(
+    CallToolRequestSchema,
+    async request => {
+
+        const name =
+            request.params.name;
+
+        const args =
+            request.params.arguments || {};
+
+
+        if (name === "delta_status") {
+
+            return {
+                content: [
+                    {
+                        type: "text",
+
+                        text: JSON.stringify(
+                            getLiveClientInfo(),
+                            null,
+                            2
+                        )
+                    }
+                ]
+            };
+        }
+
+
+        if (name === "queue_luau") {
+
+            const live =
+                getLiveClientInfo();
+
+            if (!live.connected) {
+
+                return {
+                    content: [
+                        {
+                            type: "text",
+
+                            text:
+                                "Delta client is not connected."
+                        }
+                    ],
+
+                    isError: true
+                };
+            }
+
+
+            const code =
+                String(
+                    args.code || ""
+                );
+
+
+            if (!code.trim()) {
+
+                return {
+                    content: [
+                        {
+                            type: "text",
+
+                            text:
+                                "No Luau code supplied."
+                        }
+                    ],
+
+                    isError: true
+                };
+            }
+
+
+            const commandId =
+                queueDeltaCommand(code);
+
+
+            return {
+                content: [
+                    {
+                        type: "text",
+
+                        text:
+                            `Queued command ${commandId}`
+                    }
+                ]
+            };
+        }
+
+
+        throw new Error(
+            `Unknown tool: ${name}`
+        );
+    }
+);
+
+
 // ============================================================
-// SERVER
+// SSE
 // ============================================================
 
-const PORT =
-  process.env.PORT || 3000;
+const transports =
+    new Map();
+
+
+app.get("/sse", async (req, res) => {
+
+    const transport =
+        new SSEServerTransport(
+            "/messages",
+            res
+        );
+
+    transports.set(
+        transport.sessionId,
+        transport
+    );
+
+
+    res.on("close", () => {
+
+        transports.delete(
+            transport.sessionId
+        );
+    });
+
+
+    await mcpServer.connect(
+        transport
+    );
+});
+
+
+app.post("/messages", async (req, res) => {
+
+    const sessionId =
+        req.query.sessionId;
+
+
+    const transport =
+        transports.get(
+            sessionId
+        );
+
+
+    if (!transport) {
+
+        return res.status(404).json({
+            error:
+                "MCP session not found"
+        });
+    }
+
+
+    await transport.handlePostMessage(
+        req,
+        res
+    );
+});
+
+
+// ============================================================
+// DASHBOARD HTML
+// ============================================================
+
+app.get("/", (req, res) => {
+
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+/>
+
+<title>Delta AI Hub</title>
+
+<style>
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+}
+
+body {
+    background:
+        radial-gradient(
+            circle at top left,
+            #18202b 0%,
+            #0c1016 42%,
+            #080a0e 100%
+        );
+
+    color: #f4f6f8;
+
+    font-family:
+        Inter,
+        ui-sans-serif,
+        system-ui,
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+
+    overflow: hidden;
+}
+
+button,
+textarea,
+input {
+    font: inherit;
+}
+
+button {
+    cursor: pointer;
+}
+
+.app {
+    width: 100%;
+    height: 100%;
+    display: flex;
+}
+
+.sidebar {
+    width: 265px;
+    height: 100%;
+    border-right: 1px solid rgba(255,255,255,.07);
+    background: rgba(8,11,16,.82);
+    backdrop-filter: blur(22px);
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 17px;
+    font-weight: 750;
+}
+
+.brand-mark {
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    background:
+        linear-gradient(
+            135deg,
+            #ffffff,
+            #777d87
+        );
+    box-shadow:
+        0 8px 24px rgba(255,255,255,.08);
+}
+
+.connection-card {
+    border: 1px solid rgba(255,255,255,.08);
+    background: rgba(255,255,255,.035);
+    border-radius: 14px;
+    padding: 13px;
+}
+
+.connection-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.status {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: #9ca4b0;
+    font-size: 11px;
+}
+
+.status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #555b64;
+}
+
+.status.connected .status-dot {
+    background: #4ade80;
+    box-shadow:
+        0 0 10px rgba(74,222,128,.7);
+}
+
+.player {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 13px;
+}
+
+.avatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    object-fit: cover;
+    background: #171c24;
+}
+
+.player-name {
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.game-name {
+    margin-top: 2px;
+    color: #737c89;
+    font-size: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.section-label {
+    color: #666f7c;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    font-weight: 700;
+    margin-top: 4px;
+}
+
+.history {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.history-item {
+    padding: 10px;
+    border-radius: 10px;
+    color: #a9b0ba;
+    font-size: 11px;
+    margin-bottom: 4px;
+}
+
+.history-item:hover {
+    background: rgba(255,255,255,.04);
+    color: white;
+}
+
+.main {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+.topbar {
+    height: 62px;
+    flex-shrink: 0;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+}
+
+.page-title {
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.page-subtitle {
+    color: #68717e;
+    font-size: 10px;
+    margin-top: 3px;
+}
+
+.model-button {
+    min-width: 220px;
+    border: 1px solid rgba(255,255,255,.09);
+    background: rgba(255,255,255,.045);
+    color: white;
+    border-radius: 11px;
+    padding: 9px 12px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+}
+
+.model-button:hover {
+    background: rgba(255,255,255,.07);
+}
+
+.model-button-icon {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    object-fit: contain;
+}
+
+.model-button-name {
+    flex: 1;
+    text-align: left;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.workspace {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 24px;
+}
+
+.chat {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 7px;
+}
+
+.message {
+    max-width: 850px;
+    margin: 0 auto 18px;
+}
+
+.message-user {
+    background: rgba(255,255,255,.045);
+    border: 1px solid rgba(255,255,255,.06);
+    padding: 13px 15px;
+    border-radius: 14px;
+}
+
+.message-ai {
+    padding: 4px 15px;
+}
+
+.message-role {
+    color: #68717e;
+    font-size: 10px;
+    margin-bottom: 7px;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+}
+
+.message-content {
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.55;
+    font-size: 13px;
+    color: #dce1e7;
+}
+
+.composer {
+    width: min(850px, 100%);
+    margin: 12px auto 0;
+    border: 1px solid rgba(255,255,255,.09);
+    background: rgba(10,13,18,.88);
+    border-radius: 16px;
+    padding: 10px;
+    box-shadow:
+        0 18px 60px rgba(0,0,0,.28);
+}
+
+.prompt {
+    width: 100%;
+    min-height: 85px;
+    max-height: 230px;
+    resize: vertical;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: white;
+    padding: 7px;
+}
+
+.prompt::placeholder {
+    color: #59616d;
+}
+
+.composer-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 6px;
+}
+
+.composer-hint {
+    color: #535c68;
+    font-size: 10px;
+}
+
+.send {
+    border: 0;
+    border-radius: 9px;
+    padding: 9px 15px;
+    color: #080a0e;
+    background: white;
+    font-weight: 750;
+}
+
+.send:hover {
+    background: #e5e7eb;
+}
+
+.model-menu {
+    position: fixed;
+    top: 58px;
+    right: 24px;
+    width: 350px;
+    max-height: 560px;
+    display: none;
+    flex-direction: column;
+    border: 1px solid rgba(255,255,255,.09);
+    background: rgba(12,15,20,.97);
+    backdrop-filter: blur(25px);
+    border-radius: 14px;
+    box-shadow:
+        0 25px 80px rgba(0,0,0,.5);
+    z-index: 100;
+    overflow: hidden;
+}
+
+.model-menu.open {
+    display: flex;
+}
+
+.model-search {
+    margin: 10px;
+    width: calc(100% - 20px);
+    border: 1px solid rgba(255,255,255,.08);
+    outline: none;
+    border-radius: 9px;
+    background: rgba(255,255,255,.045);
+    color: white;
+    padding: 9px 10px;
+    font-size: 11px;
+}
+
+.model-list {
+    overflow-y: auto;
+    min-height: 0;
+    padding: 4px 7px 8px;
+}
+
+.model-row {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    color: white;
+    text-align: left;
+}
+
+.model-row:hover {
+    background: rgba(255,255,255,.05);
+}
+
+.model-icon {
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+    border-radius: 8px;
+    background: rgba(255,255,255,.035);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+
+.model-icon img {
+    width: 19px;
+    height: 19px;
+    object-fit: contain;
+    display: block;
+}
+
+.model-icon.no-icon::after {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #424852;
+}
+
+.model-info {
+    min-width: 0;
+    flex: 1;
+}
+
+.model-name {
+    font-size: 11px;
+    font-weight: 650;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.model-id {
+    color: #59616d;
+    font-size: 9px;
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+::-webkit-scrollbar {
+    width: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,.09);
+    border-radius: 20px;
+}
+
+.empty {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #4f5763;
+    font-size: 12px;
+}
+
+@media(max-width: 760px) {
+
+    .sidebar {
+        display: none;
+    }
+
+    .topbar {
+        padding: 0 14px;
+    }
+
+    .workspace {
+        padding: 14px;
+    }
+
+    .model-button {
+        min-width: 160px;
+    }
+
+    .model-menu {
+        left: 14px;
+        right: 14px;
+        width: auto;
+    }
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="app">
+
+    <aside class="sidebar">
+
+        <div class="brand">
+            <div class="brand-mark"></div>
+            <span>Delta AI Hub</span>
+        </div>
+
+        <div class="connection-card">
+
+            <div class="connection-head">
+
+                <div class="section-label">
+                    Client
+                </div>
+
+                <div
+                    id="status"
+                    class="status"
+                >
+                    <span class="status-dot"></span>
+                    <span id="statusText">
+                        Waiting for Delta...
+                    </span>
+                </div>
+
+            </div>
+
+            <div
+                id="player"
+                class="player"
+            >
+
+                <img
+                    id="avatar"
+                    class="avatar"
+                    alt=""
+                >
+
+                <div
+                    style="min-width:0"
+                >
+
+                    <div
+                        id="playerName"
+                        class="player-name"
+                    >
+                        Not connected
+                    </div>
+
+                    <div
+                        id="gameName"
+                        class="game-name"
+                    >
+                        No game detected
+                    </div>
+
+                </div>
+
+            </div>
+
+        </div>
+
+        <div class="section-label">
+            Chats
+        </div>
+
+        <div
+            id="history"
+            class="history"
+        ></div>
+
+    </aside>
+
+
+    <main class="main">
+
+        <header class="topbar">
+
+            <div>
+                <div class="page-title">
+                    AI Workspace
+                </div>
+
+                <div class="page-subtitle">
+                    Connected to your Delta client
+                </div>
+            </div>
+
+
+            <button
+                id="modelButton"
+                class="model-button"
+            >
+
+                <div
+                    id="modelButtonIcon"
+                    class="model-icon"
+                ></div>
+
+                <div
+                    id="modelButtonName"
+                    class="model-button-name"
+                >
+                    Select model
+                </div>
+
+                <span>
+                    ▾
+                </span>
+
+            </button>
+
+        </header>
+
+
+        <section class="workspace">
+
+            <div
+                id="chat"
+                class="chat"
+            >
+
+                <div
+                    id="empty"
+                    class="empty"
+                >
+                    Start a conversation
+                </div>
+
+            </div>
+
+
+            <div class="composer">
+
+                <textarea
+                    id="prompt"
+                    class="prompt"
+                    placeholder="Ask Delta AI anything..."
+                ></textarea>
+
+                <div class="composer-bottom">
+
+                    <div class="composer-hint">
+                        Enter to send
+                    </div>
+
+                    <button
+                        id="send"
+                        class="send"
+                    >
+                        Send
+                    </button>
+
+                </div>
+
+            </div>
+
+        </section>
+
+    </main>
+
+</div>
+
+
+<div
+    id="modelMenu"
+    class="model-menu"
+>
+
+    <input
+        id="modelSearch"
+        class="model-search"
+        placeholder="Search models..."
+    >
+
+    <div
+        id="modelList"
+        class="model-list"
+    ></div>
+
+</div>
+
+
+<script>
+
+let models = [];
+let selectedModel = null;
+
+
+// ============================================================
+// DOM
+// ============================================================
+
+const chat =
+    document.getElementById("chat");
+
+const empty =
+    document.getElementById("empty");
+
+const prompt =
+    document.getElementById("prompt");
+
+const send =
+    document.getElementById("send");
+
+const status =
+    document.getElementById("status");
+
+const statusText =
+    document.getElementById("statusText");
+
+const playerName =
+    document.getElementById("playerName");
+
+const gameName =
+    document.getElementById("gameName");
+
+const avatar =
+    document.getElementById("avatar");
+
+const modelButton =
+    document.getElementById("modelButton");
+
+const modelButtonName =
+    document.getElementById("modelButtonName");
+
+const modelButtonIcon =
+    document.getElementById("modelButtonIcon");
+
+const modelMenu =
+    document.getElementById("modelMenu");
+
+const modelSearch =
+    document.getElementById("modelSearch");
+
+const modelList =
+    document.getElementById("modelList");
+
+
+// ============================================================
+// LOCAL STORAGE
+// ============================================================
+
+const API_KEY_STORAGE =
+    "delta_ai_hub_openrouter_key";
+
+const MODEL_STORAGE =
+    "delta_ai_hub_model";
+
+
+// ============================================================
+// CONNECTION UI
+// ============================================================
+
+function setDisconnectedUI() {
+
+    status.classList.remove(
+        "connected"
+    );
+
+    statusText.textContent =
+        "Waiting for Delta...";
+
+    playerName.textContent =
+        "Not connected";
+
+    gameName.textContent =
+        "No game detected";
+
+    avatar.removeAttribute(
+        "src"
+    );
+
+    avatar.style.display =
+        "none";
+}
+
+
+function setConnectedUI(data) {
+
+    status.classList.add(
+        "connected"
+    );
+
+    statusText.textContent =
+        "Connected";
+
+    playerName.textContent =
+        data.username ||
+        "Unknown player";
+
+    gameName.textContent =
+        data.gameName ||
+        "Unknown game";
+
+
+    if (data.avatar) {
+
+        avatar.src =
+            data.avatar;
+
+        avatar.style.display =
+            "block";
+
+    } else {
+
+        avatar.removeAttribute(
+            "src"
+        );
+
+        avatar.style.display =
+            "none";
+    }
+}
+
+
+// ============================================================
+// STATUS POLLING
+// ============================================================
+
+async function checkStatus() {
+
+    try {
+
+        const response =
+            await fetch(
+                "/status-check",
+                {
+                    cache: "no-store"
+                }
+            );
+
+        if (!response.ok) {
+            throw new Error(
+                "Status request failed"
+            );
+        }
+
+        const data =
+            await response.json();
+
+
+        if (
+            data.connected !== true
+        ) {
+
+            setDisconnectedUI();
+
+            return;
+        }
+
+
+        setConnectedUI(data);
+
+    } catch {
+
+        setDisconnectedUI();
+    }
+}
+
+
+// Check immediately.
+checkStatus();
+
+// Keep the dashboard live.
+setInterval(
+    checkStatus,
+    1500
+);
+
+
+// ============================================================
+// MODEL ICON
+// ============================================================
+
+function makeModelIcon(model) {
+
+    const wrapper =
+        document.createElement(
+            "div"
+        );
+
+    wrapper.className =
+        "model-icon";
+
+
+    const urls =
+        Array.isArray(
+            model.iconUrls
+        )
+            ? model.iconUrls
+            : [];
+
+
+    if (!urls.length) {
+
+        wrapper.classList.add(
+            "no-icon"
+        );
+
+        return wrapper;
+    }
+
+
+    const img =
+        document.createElement(
+            "img"
+        );
+
+    img.loading =
+        "eager";
+
+    img.decoding =
+        "async";
+
+    img.alt =
+        "";
+
+    img.draggable =
+        false;
+
+
+    let index = 0;
+
+
+    function tryNext() {
+
+        index++;
+
+        if (
+            index >= urls.length
+        ) {
+
+            // Do NOT substitute another
+            // company's logo.
+            img.remove();
+
+            wrapper.classList.add(
+                "no-icon"
+            );
+
+            return;
+        }
+
+        img.src =
+            urls[index];
+    }
+
+
+    img.onerror =
+        tryNext;
+
+    img.src =
+        urls[0];
+
+
+    wrapper.appendChild(
+        img
+    );
+
+    return wrapper;
+}
+
+
+// ============================================================
+// MODEL LIST
+// ============================================================
+
+function renderModels(
+    filter = ""
+) {
+
+    modelList.innerHTML =
+        "";
+
+
+    const search =
+        filter
+            .trim()
+            .toLowerCase();
+
+
+    const filtered =
+        models.filter(model => {
+
+            if (!search) {
+                return true;
+            }
+
+            return (
+                String(model.name || "")
+                    .toLowerCase()
+                    .includes(search)
+                ||
+                String(model.id || "")
+                    .toLowerCase()
+                    .includes(search)
+                ||
+                String(model.provider || "")
+                    .toLowerCase()
+                    .includes(search)
+            );
+        });
+
+
+    if (!filtered.length) {
+
+        const emptyRow =
+            document.createElement(
+                "div"
+            );
+
+        emptyRow.style.padding =
+            "16px";
+
+        emptyRow.style.color =
+            "#59616d";
+
+        emptyRow.style.fontSize =
+            "11px";
+
+        emptyRow.textContent =
+            "No models found.";
+
+        modelList.appendChild(
+            emptyRow
+        );
+
+        return;
+    }
+
+
+    const fragment =
+        document.createDocumentFragment();
+
+
+    for (const model of filtered) {
+
+        const row =
+            document.createElement(
+                "button"
+            );
+
+        row.className =
+            "model-row";
+
+
+        const icon =
+            makeModelIcon(
+                model
+            );
+
+
+        const info =
+            document.createElement(
+                "div"
+            );
+
+        info.className =
+            "model-info";
+
+
+        const name =
+            document.createElement(
+                "div"
+            );
+
+        name.className =
+            "model-name";
+
+        name.textContent =
+            model.name ||
+            model.id;
+
+
+        const id =
+            document.createElement(
+                "div"
+            );
+
+        id.className =
+            "model-id";
+
+        id.textContent =
+            model.id;
+
+
+        info.appendChild(
+            name
+        );
+
+        info.appendChild(
+            id
+        );
+
+
+        row.appendChild(
+            icon
+        );
+
+        row.appendChild(
+            info
+        );
+
+
+        row.addEventListener(
+            "click",
+            () => {
+
+                selectModel(
+                    model
+                );
+
+                modelMenu.classList.remove(
+                    "open"
+                );
+            }
+        );
+
+
+        fragment.appendChild(
+            row
+        );
+    }
+
+
+    modelList.appendChild(
+        fragment
+    );
+}
+
+
+// ============================================================
+// MODEL SELECT
+// ============================================================
+
+function selectModel(model) {
+
+    selectedModel =
+        model;
+
+
+    modelButtonName.textContent =
+        model.name ||
+        model.id;
+
+
+    modelButtonIcon.innerHTML =
+        "";
+
+
+    const icon =
+        makeModelIcon(
+            model
+        );
+
+
+    modelButtonIcon.appendChild(
+        icon
+            .querySelector("img")
+            ?.cloneNode(true)
+            ||
+            document.createElement("span")
+    );
+
+
+    localStorage.setItem(
+        MODEL_STORAGE,
+        model.id
+    );
+}
+
+
+// ============================================================
+// LOAD MODELS
+// ============================================================
+
+async function loadModels() {
+
+    try {
+
+        const response =
+            await fetch(
+                "/api/models",
+                {
+                    cache: "no-store"
+                }
+            );
+
+        const data =
+            await response.json();
+
+
+        if (
+            !response.ok ||
+            !data.ok
+        ) {
+
+            throw new Error(
+                data.error ||
+                "Failed to load models"
+            );
+        }
+
+
+        models =
+            Array.isArray(data.models)
+                ? data.models
+                : [];
+
+
+        renderModels();
+
+
+        const saved =
+            localStorage.getItem(
+                MODEL_STORAGE
+            );
+
+
+        const savedModel =
+            models.find(
+                model =>
+                    model.id === saved
+            );
+
+
+        if (savedModel) {
+
+            selectModel(
+                savedModel
+            );
+
+        } else if (models.length) {
+
+            selectModel(
+                models[0]
+            );
+        }
+
+    } catch (error) {
+
+        console.error(
+            "Model loading failed:",
+            error
+        );
+
+        modelButtonName.textContent =
+            "Failed to load models";
+    }
+}
+
+
+loadModels();
+
+
+// ============================================================
+// MODEL SEARCH
+// ============================================================
+
+modelSearch.addEventListener(
+    "input",
+    () => {
+
+        renderModels(
+            modelSearch.value
+        );
+    }
+);
+
+
+// ============================================================
+// MODEL MENU
+// ============================================================
+
+modelButton.addEventListener(
+    "click",
+    () => {
+
+        modelMenu.classList.toggle(
+            "open"
+        );
+
+
+        if (
+            modelMenu.classList.contains(
+                "open"
+            )
+        ) {
+
+            modelSearch.value =
+                "";
+
+            renderModels();
+
+            setTimeout(
+                () => modelSearch.focus(),
+                20
+            );
+        }
+    }
+);
+
+
+document.addEventListener(
+    "click",
+    event => {
+
+        if (
+            !modelMenu.contains(
+                event.target
+            ) &&
+            !modelButton.contains(
+                event.target
+            )
+        ) {
+
+            modelMenu.classList.remove(
+                "open"
+            );
+        }
+    }
+);
+
+
+// ============================================================
+// CHAT UI
+// ============================================================
+
+function addMessage(
+    role,
+    text
+) {
+
+    empty.style.display =
+        "none";
+
+
+    const wrapper =
+        document.createElement(
+            "div"
+        );
+
+    wrapper.className =
+        "message " +
+        (
+            role === "user"
+                ? "message-user"
+                : "message-ai"
+        );
+
+
+    const roleLabel =
+        document.createElement(
+            "div"
+        );
+
+    roleLabel.className =
+        "message-role";
+
+    roleLabel.textContent =
+        role === "user"
+            ? "You"
+            : "Delta AI";
+
+
+    const content =
+        document.createElement(
+            "div"
+        );
+
+    content.className =
+        "message-content";
+
+    content.textContent =
+        text;
+
+
+    wrapper.appendChild(
+        roleLabel
+    );
+
+    wrapper.appendChild(
+        content
+    );
+
+
+    chat.appendChild(
+        wrapper
+    );
+
+
+    chat.scrollTop =
+        chat.scrollHeight;
+}
+
+
+// ============================================================
+// SEND MESSAGE
+// ============================================================
+
+async function sendMessage() {
+
+    const text =
+        prompt.value.trim();
+
+
+    if (!text) {
+        return;
+    }
+
+
+    if (!selectedModel) {
+
+        addMessage(
+            "ai",
+            "Select an AI model first."
+        );
+
+        return;
+    }
+
+
+    const apiKey =
+        localStorage.getItem(
+            API_KEY_STORAGE
+        );
+
+
+    if (!apiKey) {
+
+        addMessage(
+            "ai",
+            "Add your OpenRouter API key to local storage before sending a request."
+        );
+
+        return;
+    }
+
+
+    prompt.value =
+        "";
+
+
+    addMessage(
+        "user",
+        text
+    );
+
+
+    send.disabled =
+        true;
+
+    send.textContent =
+        "Thinking...";
+
+
+    try {
+
+        const response =
+            await fetch(
+                "/ai-chat",
+                {
+                    method: "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+
+                    body: JSON.stringify({
+                        apiKey,
+                        model:
+                            selectedModel.id,
+                        prompt:
+                            text
+                    })
+                }
+            );
+
+
+        const data =
+            await response.json();
+
+
+        if (
+            !response.ok ||
+            !data.ok
+        ) {
+
+            throw new Error(
+                data.error ||
+                "AI request failed"
+            );
+        }
+
+
+        addMessage(
+            "ai",
+            data.response ||
+            "No response returned."
+        );
+
+
+    } catch (error) {
+
+        addMessage(
+            "ai",
+            `Request failed: ${error.message}`
+        );
+
+    } finally {
+
+        send.disabled =
+            false;
+
+        send.textContent =
+            "Send";
+    }
+}
+
+
+send.addEventListener(
+    "click",
+    sendMessage
+);
+
+
+prompt.addEventListener(
+    "keydown",
+    event => {
+
+        if (
+            event.key === "Enter" &&
+            !event.shiftKey
+        ) {
+
+            event.preventDefault();
+
+            sendMessage();
+        }
+    }
+);
+
+
+// ============================================================
+// DEV CONSOLE API
+// ============================================================
+//
+// You can set the key from the browser console:
+//
+// localStorage.setItem(
+//     "delta_ai_hub_openrouter_key",
+//     "YOUR_KEY"
+// )
+//
+// ============================================================
+
+</script>
+
+</body>
+
+</html>`);
+});
+
+
+// ============================================================
+// 404
+// ============================================================
+
+app.use(
+    (req, res) => {
+
+        res.status(404).json({
+            ok: false,
+            error: "Not found"
+        });
+    }
+);
+
+
+// ============================================================
+// ERROR HANDLER
+// ============================================================
+
+app.use(
+    (error, req, res, next) => {
+
+        console.error(
+            "[Server]",
+            error
+        );
+
+        if (res.headersSent) {
+            return next(error);
+        }
+
+        res.status(500).json({
+            ok: false,
+            error:
+                error.message ||
+                "Internal server error"
+        });
+    }
+);
+
+
+// ============================================================
+// START
+// ============================================================
 
 app.listen(
-  PORT,
-  () => {
-    console.log(
-      `Delta MCP Server running on port ${PORT}`
-    );
-  }
+    PORT,
+    "0.0.0.0",
+    () => {
+
+        console.log(
+            `Delta AI Hub running on port ${PORT}`
+        );
+
+        console.log(
+            "OpenRouter model catalog enabled."
+        );
+
+        console.log(
+            "Provider-first icon resolution enabled."
+        );
+
+        console.log(
+            "Stale Delta telemetry cleanup enabled."
+        );
+    }
 );
